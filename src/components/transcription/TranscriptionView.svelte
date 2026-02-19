@@ -158,39 +158,17 @@
   }
   
   // Handle editor modal save
-  // Persists changes to both the local store and LogSeq
-  async function handleEditorSave(event) {
+  // Updates only the local store - LogSeq save happens via "Save to LogSeq" button
+  function handleEditorSave(event) {
     const { lines, book, page, mergedBlockPairs } = event.detail;
 
     if (!editingPageData) return;
 
-    // Update the transcription lines in the local store
+    // Update the transcription lines in the local store only
+    // LogSeq save will happen when user clicks "Save to LogSeq" button
     updatePageTranscriptionLines(editingPageData.pageKey, lines);
 
-    // Persist to LogSeq: create new blocks, update changed existing blocks, delete merged blocks
-    const { host, token } = getLogseqSettings();
-    if (host && $logseqConnected) {
-      try {
-        log(`Saving transcription changes to LogSeq...`, 'info');
-        const result = await updateTranscriptBlocksFromEditor(book, page, lines, host, token);
-
-        if (result.success) {
-          const { stats } = result;
-          const actions = [];
-          if (stats.created > 0) actions.push(`${stats.created} created`);
-          if (stats.updated > 0) actions.push(`${stats.updated} updated`);
-          if (stats.deleted > 0) actions.push(`${stats.deleted} deleted`);
-
-          log(`Transcription saved: ${actions.join(', ') || 'no changes'}`, 'success');
-        } else {
-          log(`Failed to save transcription: ${result.error}`, 'error');
-        }
-      } catch (e) {
-        log(`Error saving to LogSeq: ${e.message}`, 'error');
-      }
-    } else {
-      log(`Updated structure for Book ${book}/Page ${page} (local only - LogSeq not connected)`, 'success');
-    }
+    log(`Updated structure for Book ${book}/Page ${page} (use "Save to LogSeq" to persist changes)`, 'success');
 
     // Close modal
     showEditorModal = false;

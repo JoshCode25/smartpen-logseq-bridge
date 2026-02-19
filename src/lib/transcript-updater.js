@@ -550,12 +550,19 @@ export async function updateTranscriptBlocks(book, page, allStrokes, newTranscri
     const pageName = pageObj.name || pageObj.originalName;
 
     console.log('=== Transcript Update v3.0 (Append-Only) ===');
+    console.log(`Incoming transcription: ${newTranscription.lines?.length || 0} lines`);
+    console.log(`Total strokes provided: ${allStrokes.length}`);
 
     // CRITICAL: Partition strokes - this is the foundation of append-only mode
     const { transcribed: strokesWithBlockUuid, untranscribed: strokesWithoutBlockUuid } =
       partitionStrokesByTranscriptionStatus(allStrokes.filter(s => !s.deleted));
 
     console.log(`Strokes: ${strokesWithBlockUuid.length} already transcribed, ${strokesWithoutBlockUuid.length} new`);
+
+    // DEBUG: Log transcription source info
+    if (newTranscription.transcribedStrokeIds) {
+      console.log(`Transcription was created from ${newTranscription.transcribedStrokeIds.length} specific strokes`);
+    }
 
     // If there are no new lines to process, we're done
     if (!newTranscription.lines || newTranscription.lines.length === 0) {
@@ -567,6 +574,13 @@ export async function updateTranscriptBlocks(book, page, allStrokes, newTranscri
         strokesAssigned: 0,
         stats: { created: 0, updated: 0, skipped: 0, preserved: 0, merged: 0, deleted: 0, errors: 0 }
       };
+    }
+
+    // DEFENSIVE: Check for lines missing yBounds (should never happen from fresh MyScript results)
+    const linesWithoutBounds = newTranscription.lines.filter(l => !l.yBounds);
+    if (linesWithoutBounds.length > 0) {
+      console.warn(`⚠️  ${linesWithoutBounds.length} lines missing yBounds - possible stale transcription data`);
+      console.warn('First line without bounds:', linesWithoutBounds[0]?.text?.substring(0, 50));
     }
 
     // Estimate stroke IDs for each NEW transcription line
@@ -582,10 +596,26 @@ export async function updateTranscriptBlocks(book, page, allStrokes, newTranscri
       };
     });
 
-    console.log(`Processing ${linesWithStrokeIds.length} NEW lines from untranscribed strokes`);
+    // CRITICAL FIX: Filter out lines with invalid Y-bounds (0.0-0.0)
+    // These indicate lines that couldn't be matched to strokes, likely due to:
+    // - Stale transcription data from previous session
+    // - Lines for strokes that already have blockUuid (shouldn't happen, but defensive)
+    const validLines = linesWithStrokeIds.filter((line, i) => {
+      const isValid = line.yBounds &&
+                     (line.yBounds.minY !== 0 || line.yBounds.maxY !== 0) &&
+                     line.strokeIds && line.strokeIds.size > 0;
 
-    // Build CREATE actions for ALL new lines (append-only - no UPDATE/SKIP/DELETE)
-    const actions = linesWithStrokeIds.map((line, i) => ({
+      if (!isValid) {
+        console.warn(`Skipping line ${i}: "${line.text?.substring(0, 50)}..." - no valid Y-bounds or strokes`);
+      }
+
+      return isValid;
+    });
+
+    console.log(`Processing ${validLines.length}/${linesWithStrokeIds.length} valid NEW lines from untranscribed strokes`);
+
+    // Build CREATE actions for valid new lines only (append-only - no UPDATE/SKIP/DELETE)
+    const actions = validLines.map((line, i) => ({
       type: 'CREATE',
       lineIndex: i,
       line: line,

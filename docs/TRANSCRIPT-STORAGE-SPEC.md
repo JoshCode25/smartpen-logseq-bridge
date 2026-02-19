@@ -1,8 +1,8 @@
 # Transcript Storage & Update Specification
 
-**Version:** 3.0 (Block-by-Block Approach)
-**Date:** 2026-01-27
-**Status:** Active Implementation with Known Data Loss Issues
+**Version:** 3.1 (Append-Only with Explicit Deletions)
+**Date:** 2026-02-09 (Updated)
+**Status:** Active Implementation - Data Loss Issues RESOLVED
 
 ---
 
@@ -718,7 +718,10 @@ if (canonical(newText) === block.properties['canonical-transcript']) {
 
 ## Known Issues & Data Loss Points
 
-### Issue 1: Y-Bounds Reset on Update ⚠️ CRITICAL
+> **Update 2026-02-09:** Critical stroke deletion issue (Issue #6) has been RESOLVED in v3.1.
+> See commits 0a836ac and 8c129a8 for fixes.
+
+### Issue 1: Y-Bounds Reset on Update ✅ FIXED (commit 8c129a8)
 
 **Location:** `transcript-updater.js` line 630-655 (UPDATE action execution)
 
@@ -743,6 +746,9 @@ await updateTranscriptBlockWithPreservation(
 - On next update, Y-bounds matching may fail
 - Strokes may match to wrong blocks
 - User loses ability to incrementally update
+
+**Fix (2026-02-09):** `transcript-updater.js` now preserves existing Y-bounds during updates.
+Properties are merged rather than replaced, maintaining stroke-to-block associations.
 
 **Example:**
 ```
@@ -891,7 +897,58 @@ for (const block of orphanedBlocks) {
 
 ---
 
-### Issue 6: No Atomic Transactions
+### Issue 6: Phantom Stroke Deletions ✅ FIXED (commit 0a836ac)
+
+**Location:** `logseq-api.js` line 673-803 (`updatePageStrokesSingle()`)
+
+**Problem (v3.0):**
+```javascript
+// Old arithmetic deletion detection
+deletedCount = Math.max(0, existingData.strokes.length - simplifiedStrokes.length);
+allStrokes = simplifiedStrokes;  // ← REPLACES all LogSeq data
+```
+
+**Result:** Missing strokes from canvas treated as deletions
+
+**Impact:**
+- Partial imports + save = data loss
+- Unloaded strokes deleted from LogSeq
+- Users lose historical stroke data
+- No way to incrementally add strokes
+
+**Example:**
+```
+LogSeq has: 200 strokes
+Canvas loads: 50 strokes (last import)
+User saves: 150 strokes DELETED from LogSeq
+```
+
+**Fix (v3.1 - 2026-02-09):**
+```javascript
+// Explicit deletion tracking via pending-changes.js
+const deletedStrokeIds = getDeletedStrokeIdsForPage(book, page);
+
+// v3.1 APPEND-ONLY:
+// 1. Start from existingData.strokes as base
+// 2. Remove ONLY strokes in deletedStrokeIds
+// 3. Append new strokes (deduplicated)
+// 4. Update blockUuid on existing strokes if changed
+
+mergedStrokes = existingData.strokes.filter(s => !deletedStrokeIds.has(s.id));
+const uniqueNew = deduplicateStrokes(mergedStrokes, simplifiedStrokes);
+allStrokes = [...mergedStrokes, ...uniqueNew];
+```
+
+**Benefits:**
+- Missing strokes ≠ deleted strokes
+- Explicit deletion tracking in `deletedIndices` store
+- Safe partial imports
+- Incremental stroke additions work correctly
+- User has 15-minute undo window for deletions
+
+---
+
+### Issue 7: No Atomic Transactions
 
 **Problem:** Save operations are multi-step:
 1. Save strokes

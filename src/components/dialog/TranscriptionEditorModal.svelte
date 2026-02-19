@@ -5,8 +5,6 @@
 <script>
   import { createEventDispatcher } from 'svelte';
   import { reassignStrokes, getStrokesSnapshot, updateStrokeBlockUuids, getStrokesInYRange } from '$stores/strokes.js';
-  import { updatePageStrokes } from '$lib/logseq-api.js';
-  import { getLogseqSettings } from '$stores/settings.js';
 
   export let book;
   export let page;
@@ -277,11 +275,10 @@
     editedLines = editedLines;
   }
 
-  // Save changes and close modal
-  async function handleSave() {
+  // Save changes locally and close modal (does NOT save to LogSeq)
+  function handleSave() {
     // Track stroke reassignments for merges
     const mergedBlockPairs = [];
-    let strokesChanged = false;
 
     for (const line of editedLines) {
       if (line.blocksToDelete && line.blocksToDelete.length > 0 && line.blockUuid) {
@@ -311,11 +308,10 @@
       }
     }
 
-    // Reassign strokes from deleted blocks to surviving blocks
+    // Reassign strokes from deleted blocks to surviving blocks (local only)
     for (const { deletedBlockUuid, survivingBlockUuid } of mergedBlockPairs) {
       const count = reassignStrokes(deletedBlockUuid, survivingBlockUuid);
       if (count > 0) {
-        strokesChanged = true;
         console.log(`Reassigned ${count} strokes from ${deletedBlockUuid} to ${survivingBlockUuid}`);
       }
     }
@@ -324,27 +320,6 @@
     const splitBlocks = editedLines.filter(line => line.syncStatus === 'new' && line.yBounds);
     for (const splitBlock of splitBlocks) {
       console.log(`Split block detected at Y: ${splitBlock.yBounds.minY}-${splitBlock.yBounds.maxY}`);
-    }
-
-    // Persist stroke changes if any were made
-    if (strokesChanged) {
-      try {
-        const { host, token } = getLogseqSettings();
-
-        if (host) {
-          const allStrokes = getStrokesSnapshot();
-          const pageStrokes = allStrokes.filter(s =>
-            s.pageInfo?.book === book && s.pageInfo?.page === page
-          );
-
-          if (pageStrokes.length > 0) {
-            console.log(`Persisting ${pageStrokes.length} strokes with updated blockUuids`);
-            await updatePageStrokes(book, page, pageStrokes, host, token);
-          }
-        }
-      } catch (error) {
-        console.error('Failed to persist stroke changes:', error);
-      }
     }
 
     dispatch('save', {
@@ -623,7 +598,7 @@
       </div>
       <div class="footer-actions">
         <button class="btn btn-cancel" on:click={handleClose}>Cancel</button>
-        <button class="btn btn-primary" on:click={handleSave}>Save Changes</button>
+        <button class="btn btn-primary" on:click={handleSave}>Confirm</button>
       </div>
     </div>
   </div>

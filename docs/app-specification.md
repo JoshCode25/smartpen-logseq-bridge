@@ -714,5 +714,6 @@ blocks: [
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.2.1 | Feb 2026 | Data loss fixes (v3.1 append-only), explicit deletion tracking |
 | 0.2.0 | Dec 2024 | Svelte 4 migration, pan/zoom, auto-fit |
 | 0.1.0 | Nov 2024 | Initial vanilla JS implementation |

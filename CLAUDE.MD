@@ -64,7 +64,10 @@ All state is managed through Svelte stores located in `src/stores/`:
 
 **Advanced:**
 - `filtered-strokes.js` - Decorative element detection
-- `pending-changes.js` - Undo system for deletions
+- `pending-changes.js` - Tracks local changes before sync (deletions, additions per page)
+  - `deletedIndices` - Set of stroke indices marked for deletion
+  - `pendingChanges` - Derived store computing additions/deletions per page
+  - `getDeletedStrokeIdsForPage()` - Converts indices to stroke IDs for API calls
 - `settings.js` - Persisted user settings (MyScript keys, LogSeq config)
 
 ### Key Libraries
@@ -252,23 +255,30 @@ try {
 - Stroke data stored as JSON in `stroke-data` property
 - Transcription stored in `transcription` property
 
-### Stroke Persistence Strategy
-- Original strokes stay with pages (never deleted)
-- Duplicated strokes are temporary (can be deleted)
-- Conversion: duplicated → original when creating new page
-- Use UUID system for tracking (see `src/lib/uuid/bridge-uuid.js`)
+### Stroke Persistence Strategy (v3.1 Append-Only)
+- **Append-Only Updates**: LogSeq saves start from existing strokes as base, never replace entire dataset
+- **Explicit Deletions Only**: Deletions tracked in `pending-changes.js` via `deletedIndices` store
+- **No Phantom Deletions**: Missing strokes from canvas ≠ deleted strokes in LogSeq
+- **Stroke IDs**: Format `s{startTime}` for deduplication (see `src/lib/stroke-storage.js`)
+- **BlockUuid Tracking**: Each stroke links to its LogSeq block UUID for bi-directional sync
+- **Duplicated Strokes**: Temporary strokes (isDuplicated: true) can be converted to original when creating new pages
+- **Deletion Timeout**: 15-minute undo window for deleted strokes (see `pending-changes.js`)
 
 ## Known Issues and Gotchas
 
-1. **Duplicate Stroke Detection**: Recent implementation uses timestamp-based IDs to avoid duplicates when importing from LogSeq. See commits for UUID implementation details.
+1. **Stroke Deduplication**: Uses timestamp-based IDs (`s{startTime}`) to avoid duplicates when importing from LogSeq. See `stroke-storage.js` for implementation.
 
-2. **Page Coordinate Fuzzy Matching**: LogSeq import uses fuzzy matching for section/owner to handle Ncode variations. Focus on book/page for uniqueness.
+2. **Append-Only Updates**: Save operations NEVER replace entire LogSeq datasets. Always start from existing strokes and only apply explicit changes (additions/deletions).
 
-3. **Memory Management**: Large stroke datasets (>2000 strokes) can impact canvas performance. Use page filtering to reduce visible strokes.
+3. **Deletion Tracking**: Deletions are tracked via `pending-changes.js` store (`deletedIndices`). The `getDeletedStrokeIdsForPage()` function converts indices to stroke IDs for LogSeq API calls.
 
-4. **LocalStorage Limits**: Settings, page positions, and scales persist to localStorage. Monitor size (~5MB typical limit).
+4. **Page Coordinate Fuzzy Matching**: LogSeq import uses fuzzy matching for section/owner to handle Ncode variations. Focus on book/page for uniqueness.
 
-5. **Deletion Timeout**: Stroke deletions have a 15-minute timeout for undo capability (see recent commit).
+5. **Memory Management**: Large stroke datasets (>2000 strokes) can impact canvas performance. Use page filtering to reduce visible strokes.
+
+6. **LocalStorage Limits**: Settings, page positions, and scales persist to localStorage. Monitor size (~5MB typical limit).
+
+7. **Deletion Undo Timeout**: Stroke deletions have a 15-minute timeout for undo capability. After timeout, deletions are permanent once saved to LogSeq.
 
 ## Testing Considerations
 
@@ -301,11 +311,18 @@ npm run preview
 
 ## Resources
 
+### Primary Documentation
 - [README.md](README.md) - User-facing documentation
+- [docs/QUICK-ARCHITECTURE-REFERENCE.md](docs/QUICK-ARCHITECTURE-REFERENCE.md) - **START HERE** - Quick v3.1 reference
 - [docs/app-specification.md](docs/app-specification.md) - Complete technical specification
-- [docs/TRANSCRIPT-STORAGE-SPEC.md](docs/TRANSCRIPT-STORAGE-SPEC.md) - Transcript storage v3.0 architecture
+- [docs/TRANSCRIPT-STORAGE-SPEC.md](docs/TRANSCRIPT-STORAGE-SPEC.md) - Transcript storage v3.1 architecture
+
+### Implementation Details
+- [docs/Archive/2026-02-data-loss-fixes/DATA-LOSS-FIXES-SUMMARY.md](docs/Archive/2026-02-data-loss-fixes/DATA-LOSS-FIXES-SUMMARY.md) - Recent fixes (Feb 2026)
 - [docs/bridge-uuid-system.md](docs/bridge-uuid-system.md) - Custom UUID system documentation
 - [docs/Archive/ARCHIVE-INDEX.md](docs/Archive/ARCHIVE-INDEX.md) - Archived implementation docs index
+
+### External APIs
 - [NeoSmartpen Web SDK](https://github.com/NeoSmartpen/WEB-SDK2.0) - SDK documentation
 - [MyScript API Docs](https://developer.myscript.com/) - Handwriting recognition API
 - [LogSeq HTTP API](https://logseq.github.io/plugins/) - Plugin and API documentation
@@ -313,7 +330,24 @@ npm run preview
 
 ## Recent Changes (Git History Context)
 
-Recent commits focus on:
+### Major Fixes (February 2026)
+
+**Data Loss Prevention (commit 0a836ac):**
+- Fixed stroke deletion to be explicit only (no phantom deletions from partial imports)
+- Updated `updatePageStrokesSingle()` to use append-only strategy
+- Changed deletion counting from arithmetic (`existing - current`) to explicit tracking via `deletedStrokeIds`
+- Stroke saves now preserve all LogSeq data unless explicitly marked for deletion in `pending-changes.js`
+
+**Edit Structure UI Overhaul (commit 0a836ac):**
+- Converted TranscriptionEditorModal to single-column layout
+- Improved visual hierarchy and editing experience
+- Fixed deletion counts in SaveConfirmDialog to use explicit deletion tracking
+
+**Y-Bounds Preservation (commit 8c129a8):**
+- Fixed transcript updates to preserve Y-bounds properties
+- Ensures stroke-to-block matching data survives LogSeq round-trips
+
+### Earlier Work
 - Electron desktop app conversion (electron/ directory, vite.config.js updates)
 - Hierarchical block creation order fix (parent blocks before children)
 - Transcript data loss fixes (Y-bounds, blockUuid preservation, merge logic)
