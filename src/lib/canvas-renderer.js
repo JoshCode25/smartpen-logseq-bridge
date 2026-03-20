@@ -33,7 +33,8 @@ export class CanvasRenderer {
     
     // Page-based layout
     this.pageOffsets = new Map(); // Map of "B{book}/P{page}" -> {offsetX, offsetY, bounds}
-    this.pageSpacing = 20; // mm between pages
+    this.pageSpacing = 20; // mm between pages (horizontal and vertical)
+    this.pageColumns = 5; // pages per row before wrapping
     
     this.viewWidth = 0;
     this.viewHeight = 0;
@@ -314,15 +315,11 @@ export class CanvasRenderer {
       return pageA - pageB;
     });
     
-    let currentOffsetX = 0;
-    let globalMinY = Infinity;
-    let globalMaxY = -Infinity;
-    
-    sortedPageEntries.forEach(([pageKey, pageStrokes]) => {
-      // Calculate bounds for this page
+    // First pass: compute per-page bounds, width, and height
+    const pageBoundsArray = sortedPageEntries.map(([pageKey, pageStrokes]) => {
       let pageMinX = Infinity, pageMinY = Infinity;
       let pageMaxX = -Infinity, pageMaxY = -Infinity;
-      
+
       pageStrokes.forEach(stroke => {
         const dots = stroke.dotArray || stroke.dots || [];
         dots.forEach(dot => {
@@ -332,45 +329,60 @@ export class CanvasRenderer {
           pageMaxY = Math.max(pageMaxY, dot.y);
         });
       });
-      
-      const pageWidth = (pageMaxX - pageMinX);
-      
-      // Store page offset and bounds
-      this.pageOffsets.set(pageKey, {
-        offsetX: currentOffsetX,
-        offsetY: 0, // All pages aligned vertically
-        bounds: {
-          minX: pageMinX,
-          minY: pageMinY,
-          maxX: pageMaxX,
-          maxY: pageMaxY
-        }
+
+      return {
+        pageKey,
+        bounds: { minX: pageMinX, minY: pageMinY, maxX: pageMaxX, maxY: pageMaxY },
+        width: pageMaxX - pageMinX,
+        height: pageMaxY - pageMinY
+      };
+    });
+
+    // Compute the max height for each row (needed to space rows apart)
+    const columns = this.pageColumns;
+    const rowCount = Math.ceil(pageBoundsArray.length / columns);
+    const rowMaxHeights = new Array(rowCount).fill(0);
+    pageBoundsArray.forEach((page, index) => {
+      const row = Math.floor(index / columns);
+      rowMaxHeights[row] = Math.max(rowMaxHeights[row], page.height);
+    });
+
+    // Compute cumulative Y start position for each row
+    const rowStartY = new Array(rowCount).fill(0);
+    for (let r = 1; r < rowCount; r++) {
+      rowStartY[r] = rowStartY[r - 1] + rowMaxHeights[r - 1] + this.pageSpacing;
+    }
+
+    // Second pass: assign offsets and update global bounds
+    // offsetX positions the page's left edge in world space (world_x = dot.x - bounds.minX + offsetX)
+    // offsetY positions the page's top edge in world space (world_y = dot.y - bounds.minY + offsetY)
+    let currentRowX = 0;
+    pageBoundsArray.forEach((page, index) => {
+      const col = index % columns;
+      const row = Math.floor(index / columns);
+
+      if (col === 0) currentRowX = 0;
+
+      const offsetX = currentRowX;
+      const offsetY = rowStartY[row];
+
+      this.pageOffsets.set(page.pageKey, {
+        offsetX,
+        offsetY,
+        bounds: page.bounds
       });
-      
-      // Update global bounds (in transformed space)
-      this.bounds.minX = Math.min(this.bounds.minX, currentOffsetX);
-      this.bounds.minY = Math.min(this.bounds.minY, pageMinY);
-      this.bounds.maxX = Math.max(this.bounds.maxX, currentOffsetX + pageWidth);
-      this.bounds.maxY = Math.max(this.bounds.maxY, pageMaxY);
-      
-      globalMinY = Math.min(globalMinY, pageMinY);
-      globalMaxY = Math.max(globalMaxY, pageMaxY);
-      
-      // Move offset for next page (add page width + spacing)
-      currentOffsetX += pageWidth + this.pageSpacing;
+
+      this.bounds.minX = Math.min(this.bounds.minX, offsetX);
+      this.bounds.minY = Math.min(this.bounds.minY, offsetY);
+      this.bounds.maxX = Math.max(this.bounds.maxX, offsetX + page.width);
+      this.bounds.maxY = Math.max(this.bounds.maxY, offsetY + page.height);
+
+      currentRowX += page.width + this.pageSpacing;
     });
-    
-    // Align all pages so their top edge maps to y=0 in world space.
-    // ncodeToScreen computes: y = (dot.y - bounds.minY + offsetY) * scale
-    // We want this to equal (dot.y - globalMinY) * scale, so:
-    // offsetY = bounds.minY - globalMinY
-    this.pageOffsets.forEach(offset => {
-      offset.offsetY = offset.bounds.minY - globalMinY;
-    });
-    
-    // Update global bounds with baseline offset
+
+    // Normalise so the top-left of all content is at world (0, 0)
+    this.bounds.minX = 0;
     this.bounds.minY = 0;
-    this.bounds.maxY = globalMaxY - globalMinY;
     
     console.log('Page offsets calculated:', Array.from(this.pageOffsets.keys()));
   }
