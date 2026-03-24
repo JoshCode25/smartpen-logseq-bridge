@@ -3,10 +3,10 @@
  */
 
 // Strokes
-export { 
-  strokes, 
-  pages, 
-  strokeCount, 
+export {
+  strokes,
+  pages,
+  strokeCount,
   currentPageInfo,
   batchMode,
   addStroke,
@@ -15,7 +15,9 @@ export {
   startBatchMode,
   endBatchMode,
   clearStrokes,
-  removeStrokesByIndices
+  removeStrokesByIndices,
+  clearStrokeBlockUuids,
+  getActiveStrokesForPageFromStore
 } from './strokes.js';
 
 // Selection

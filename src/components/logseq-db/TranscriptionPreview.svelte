@@ -69,14 +69,6 @@
   {:else}
     <div class="preview-wrapper">
       <pre>{displayText}</pre>
-      {#if editable}
-        <button class="edit-btn" on:click={handleEdit} title="Edit transcription">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
-          </svg>
-          Edit
-        </button>
-      {/if}
     </div>
   {/if}
 </div>
@@ -112,29 +104,7 @@
     font-size: 0.875rem;
   }
   
-  .edit-btn {
-    position: absolute;
-    top: 0;
-    right: 0;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 8px;
-    background: var(--accent);
-    color: white;
-    border: none;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    cursor: pointer;
-    opacity: 0.7;
-    transition: opacity 0.2s;
-  }
-  
-  .edit-btn:hover {
-    opacity: 1;
-  }
-  
-  .editor {
+.editor {
     display: flex;
     flex-direction: column;
     gap: 8px;

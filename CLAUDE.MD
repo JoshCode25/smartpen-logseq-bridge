@@ -314,7 +314,7 @@ Existing test files (all in `src/lib/__tests__/`):
 | `transcript-updater.test.js` | `updateTranscriptBlocks` — validLines filter (Y-bounds gating), duplicate prevention, dedupedLines index correctness |
 | `myscript-api.test.js` | `parseMyScriptResponse` — line parsing, Y-bounds from word bboxes, fallback interpolation, indentation, checkbox normalisation |
 | `transcript-search.test.js` | `tokenize` (hyphen preservation, property filtering), `searchPages` (partial matching, ranking), `highlightMatches` (HTML escaping) |
-| `stroke-filter.test.js` | `filterDecorativeStrokes` / `detectDecorativeIndices` — underline, circle, 2-stroke box detection and threshold behaviour |
+| `stroke-filter.test.js` | `filterDecorativeStrokes` / `detectDecorativeIndices` — underline, circle, single-stroke box detection (perimeter-fraction + path-ratio), threshold behaviour, regression for vertical lines and multi-stroke grouping |
 
 When writing new tests follow the patterns in the existing files:
 - Mock Svelte stores and LogSeq API calls (`vi.mock()`) before imports
@@ -373,6 +373,21 @@ npm run preview
 ## Recent Changes (Git History Context)
 
 ### Major Fixes (March 2026)
+
+**LogSeq DB Tab — PageCard UX Overhaul (2026-03-24):**
+- Redesigned `PageCard.svelte` for scalability with growing page lists
+- Compact single-row header: sync badge · icon · title · ▶ expand · Import Strokes (inline)
+- Transcript section is collapsed by default; expand arrow only appears when transcript data exists — solves the scroll-hijacking problem caused by tall preview boxes
+- Transcript section header: `TRANSCRIPTION:` + `[Edit]` + `[↺ Reset]` inline action buttons
+- **Reset Transcript**: clears `blockUuid` from session-loaded strokes and in-memory transcription entry so a page can be re-transcribed after a truncated run; logs result to ActivityLog; LogSeq blocks are not deleted
+- Removed stale stroke-count/last-updated metadata row (returned 0/Unknown)
+- Removed floating inline edit-pencil from `TranscriptionPreview.svelte` (editing via modal only)
+
+**Decorative Stroke Filter — Single-stroke Only (2026-03-24):**
+- Rewrote `stroke-filter.js`: removed 2-stroke H+V box detection and vertical-line detection
+- Replaced `StrokeAnalyzer` corner-detection with perimeter-fraction + path-ratio heuristic
+- All three detectors (underlines, boxes, circles) now operate on individual strokes only
+- See: `docs/QUICK-ARCHITECTURE-REFERENCE.md` → Decorative Stroke Filter
 
 **Offline Import Performance (2026-03-19):**
 - Resolved per-book transfer promise immediately on `OFFLINE_DATA_SEND_SUCCESS` instead of waiting 10s idle timeout — the SDK's own "success" signal is reliable; idle timeout kept as fallback only

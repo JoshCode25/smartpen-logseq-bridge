@@ -2,7 +2,7 @@
   TranscriptionView.svelte - Per-page transcription display with import checkboxes
 -->
 <script>
-  import { 
+  import {
     isTranscribing,
     pageTranscriptionsArray,
     hasPageTranscriptions,
@@ -15,7 +15,9 @@
     log,
     logseqConnected,
     getLogseqSettings,
-    pageTranscriptionCount
+    pageTranscriptionCount,
+    clearStrokeBlockUuids,
+    getActiveStrokesForPageFromStore
   } from '$stores';
   import { bookAliases } from '$stores';
   import { sendToLogseq, getTranscriptLines, mergeExistingAndNewLines, updateTranscriptBlocksFromEditor } from '$lib/logseq-api.js';
@@ -180,6 +182,20 @@
     showEditorModal = false;
     editingPageData = null;
   }
+
+  /**
+   * Reset transcript for a page — clears both the in-memory transcription and
+   * the blockUuid property on every stroke so the page can be fully re-transcribed.
+   * LogSeq blocks are NOT deleted; they will be overwritten when the user saves again.
+   */
+  function handleResetTranscript(pageData) {
+    const { book, page } = pageData.pageInfo;
+    const pageStrokes = getActiveStrokesForPageFromStore(book, page);
+    const timestamps = pageStrokes.map(s => s.startTime);
+    clearStrokeBlockUuids(timestamps);
+    clearPageTranscription(pageData.pageKey);
+    log(`Reset transcript for Book ${book}/Page ${page} — ${timestamps.length} stroke(s) cleared for re-transcription`, 'info');
+  }
 </script>
 
 <div class="transcription-view">
@@ -275,10 +291,20 @@
                   <polyline points="6 9 12 15 18 9"/>
                 </svg>
               </button>
-              <button 
+              <button
+                class="btn-icon reset-btn"
+                on:click={() => handleResetTranscript(pageData)}
+                title="Reset transcript — removes block associations from strokes so this page can be re-transcribed (LogSeq blocks are not deleted)"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                  <path d="M3 3v5h5"/>
+                </svg>
+              </button>
+              <button
                 class="btn-icon delete-btn"
                 on:click={() => clearPageTranscription(pageData.pageKey)}
-                title="Remove this transcription"
+                title="Remove this transcription (keeps block associations on strokes)"
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M18 6L6 18M6 6l12 12"/>
@@ -616,6 +642,10 @@
 
   .expand-btn svg.rotated {
     transform: rotate(180deg);
+  }
+
+  .reset-btn:hover {
+    color: var(--warning, #f59e0b);
   }
 
   .delete-btn:hover {

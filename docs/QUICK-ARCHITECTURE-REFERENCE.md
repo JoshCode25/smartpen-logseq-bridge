@@ -1,7 +1,7 @@
 # Quick Architecture Reference
 
 **Current Version:** 3.1 (Append-Only with Explicit Deletions)
-**Last Updated:** 2026-03-19
+**Last Updated:** 2026-03-24
 
 This document provides a quick reference for AI assistants working on the smartpen-logseq-bridge project.
 
@@ -47,6 +47,12 @@ This document provides a quick reference for AI assistants working on the smartp
 - `src/components/header/ActionBar.svelte` - Save handler (passes deletedStrokeIds)
 - `src/components/dialog/SaveConfirmDialog.svelte` - Shows accurate change counts
 - `src/components/dialog/TranscriptionEditorModal.svelte` - Single-column editor
+- `src/components/logseq-db/PageCard.svelte` - Per-page card in LogSeq DB tab
+  - Compact header row: sync badge · icon · page title · ▶ expand · Import Strokes
+  - Collapsible transcript section (expand arrow only shown when transcript exists)
+  - Transcript section header: `TRANSCRIPTION:` · `[Edit]` · `[↺ Reset]`
+  - Reset Transcript clears `blockUuid` from loaded strokes + in-memory transcription entry
+- `src/components/logseq-db/TranscriptionPreview.svelte` - Read-only transcript display (inline edit button removed)
 
 ### Canvas / Live Writing
 - `src/lib/canvas-renderer.js` - Drawing engine; coordinate transforms; zoom/pan
@@ -188,6 +194,18 @@ smartpen/B3017/P42
 ## Recent Fixes
 
 ### March 2026
+
+#### ✅ LogSeq DB Tab — PageCard UX Overhaul (2026-03-24)
+Redesigned `src/components/logseq-db/PageCard.svelte` for better scalability with large page lists:
+
+- **Compact header row** — icon · page title · sync badge · expand arrow · Import Strokes button, all on one line; no separate metadata row
+- **Collapsible transcript** — transcript section hidden by default; expand arrow (▶/▼) only appears when a page has transcription data, so scrolling through many pages is no longer interrupted by tall preview boxes
+- **Transcript section header** — `TRANSCRIPTION:` label with inline `[Edit]` and `[↺ Reset]` action buttons; Reset button styled in warning amber
+- **Reset Transcript action** — clears `blockUuid` from all session-loaded strokes for the page and removes the in-memory `pageTranscriptions` entry, allowing re-transcription of pages where the previous run was truncated; logs outcome to ActivityLog; does not delete LogSeq blocks
+- **Removed**: separate `page-actions` row, stroke count / last-updated metadata (returned stale data), and the floating inline edit-pencil button from `TranscriptionPreview.svelte`
+- **Sync badge** pinned left of the flex spacer (right of page title) so its position is stable regardless of expand-arrow presence
+
+---
 
 #### ✅ Decorative Stroke Filter — Single-stroke Only (2026-03-24)
 Rewrote `src/lib/stroke-filter.js` to detect only individual strokes — no multi-stroke grouping:

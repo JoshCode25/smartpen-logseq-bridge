@@ -1,5 +1,8 @@
 <!--
   PageCard.svelte - Display a single smartpen page with import button
+
+  Layout: a compact header row (icon · title · badge · expand arrow · Import button)
+  with a collapsible transcript section beneath it (only when transcript data exists).
 -->
 <script>
   import { importStrokesFromLogSeq } from '$lib/logseq-import.js';
@@ -7,28 +10,38 @@
   import TranscriptionPreview from './TranscriptionPreview.svelte';
   import TranscriptionEditorModal from '../dialog/TranscriptionEditorModal.svelte';
   import SyncStatusBadge from './SyncStatusBadge.svelte';
-  import { pageTranscriptions, logseqHost, logseqToken } from '$stores';
-  
+  import {
+    pageTranscriptions,
+    logseqHost,
+    logseqToken,
+    clearPageTranscription,
+    clearStrokeBlockUuids,
+    getActiveStrokesForPageFromStore,
+    log
+  } from '$stores';
+
   export let page; // LogSeqPageData object
-  
+
   let importing = false;
   let importProgress = { current: 0, total: 0 };
   let editedTranscription = page.transcriptionText || '';
   let showEditorModal = false;
   let editorLines = [];
   let loadingLines = false;
-  
+  let transcriptExpanded = false;
+
   // Update edited transcription when page changes
   $: editedTranscription = page.transcriptionText || '';
-  
+
+  // Convenience flag
+  $: hasTranscription = !!(page.transcriptionText || editedTranscription);
+
   async function handleImport() {
     importing = true;
     importProgress = { current: 0, total: page.strokeCount || 0 };
-    
+
     try {
-      // Show progress during import
       const result = await importStrokesFromLogSeq(page, (current, total) => {
-        console.log(`Import progress: ${current}/${total}`);
         importProgress = { current, total };
       });
       console.log('Import complete:', result);
@@ -37,25 +50,13 @@
       importProgress = { current: 0, total: 0 };
     }
   }
-  
-  function formatDate(timestamp) {
-    if (!timestamp) return 'Unknown';
-    return new Date(timestamp).toLocaleString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit'
-    });
-  }
-  
+
   function handleTranscriptionChange(event) {
     const newText = event.detail;
     editedTranscription = newText;
-    
-    // Build page key for store lookup
+
     const pageKey = `S0/O0/B${page.book}/P${page.page}`;
-    
-    // Check if transcription exists in store
+
     let existingTranscription = null;
     for (const [key, trans] of $pageTranscriptions) {
       if (trans.pageInfo.book === page.book && trans.pageInfo.page === page.page) {
@@ -63,80 +64,52 @@
         break;
       }
     }
-    
-    // Parse lines from edited text and preserve indentation
+
     const lines = newText.split('\n').map((line, index) => {
-      // Calculate indentation level from leading spaces
-      // Each 2 spaces = 1 indent level
       const leadingSpaces = line.match(/^\s*/)[0].length;
       const indentLevel = Math.floor(leadingSpaces / 2);
-      
-      // Get the text without leading/trailing whitespace for the trimmed version
-      const trimmedText = line.trimStart();
-      
       return {
-        text: trimmedText,
+        text: line.trimStart(),
         lineNumber: index,
-        indentLevel: indentLevel,
+        indentLevel,
         parent: null,
         children: []
       };
     });
-    
-    // Update or create transcription in store
+
     pageTranscriptions.update(pt => {
       const newMap = new Map(pt);
-      
       if (existingTranscription) {
-        // Update existing entry
-        newMap.set(pageKey, {
-          ...existingTranscription,
-          text: newText,
-          lines
-        });
+        newMap.set(pageKey, { ...existingTranscription, text: newText, lines });
       } else {
-        // Create new entry for imported page
         newMap.set(pageKey, {
           text: newText,
           lines,
-          pageInfo: {
-            section: 0,
-            owner: 0,
-            book: page.book,
-            page: page.page
-          },
+          pageInfo: { section: 0, owner: 0, book: page.book, page: page.page },
           strokeCount: page.strokeCount || 0,
           timestamp: Date.now()
         });
       }
-      
       return newMap;
     });
-    
-    console.log(`Updated transcription for B${page.book}/P${page.page}`);
   }
-  
+
   async function handleOpenEditor() {
     loadingLines = true;
-    
     try {
-      // Fetch lines from LogSeq
       const host = $logseqHost || 'http://localhost:12315';
       const token = $logseqToken || '';
-      
       const lines = await getTranscriptLines(page.book, page.page, host, token);
-      
+
       if (lines.length === 0) {
         alert('No transcription blocks found. Please transcribe the page first.');
         return;
       }
-      
+
       editorLines = lines;
       showEditorModal = true;
     } catch (error) {
       console.error('Failed to load transcript lines:', error);
-      
-      // Show user-friendly error message
       if (error.message.includes('old transcription format')) {
         alert(
           'This page uses the old transcription storage format.\n\n' +
@@ -153,33 +126,49 @@
       loadingLines = false;
     }
   }
-  
+
+  /**
+   * Reset transcript — strips blockUuid from all loaded strokes on this page
+   * and clears any in-memory transcription entry so the page can be re-transcribed.
+   * LogSeq blocks are not deleted; they will be overwritten on the next save.
+   */
+  function handleResetTranscript() {
+    const pageStrokes = getActiveStrokesForPageFromStore(page.book, page.page);
+    const timestamps = pageStrokes.map(s => s.startTime);
+
+    if (timestamps.length > 0) {
+      clearStrokeBlockUuids(timestamps);
+    }
+
+    for (const [key, trans] of $pageTranscriptions) {
+      if (trans.pageInfo?.book === page.book && trans.pageInfo?.page === page.page) {
+        clearPageTranscription(key);
+        break;
+      }
+    }
+
+    const strokeMsg = timestamps.length > 0
+      ? `${timestamps.length} stroke(s) cleared for re-transcription`
+      : 'no strokes loaded in session (import strokes first to clear block associations)';
+    log(`Reset transcript for B${page.book}/P${page.page} — ${strokeMsg}`, 'info');
+  }
+
   async function handleSaveEditor(event) {
     const { lines: editedLines } = event.detail;
-    
     try {
       const host = $logseqHost || 'http://localhost:12315';
       const token = $logseqToken || '';
-      
-      // Use the new editor-specific update function
+
       const result = await updateTranscriptBlocksFromEditor(
-        page.book,
-        page.page,
-        editedLines,
-        host,
-        token
+        page.book, page.page, editedLines, host, token
       );
-      
+
       console.log('Transcription updated:', result);
-      
+
       if (result.success) {
-        // Update page UI
         editedTranscription = editedLines.map(l => '  '.repeat(l.indentLevel || 0) + l.text).join('\n');
         page.syncStatus = result.stats.created > 0 ? 'new_content' : 'synced';
-        
-        // Close modal
         showEditorModal = false;
-        
         alert(
           `✓ Successfully saved changes!\n\n` +
           `Updated: ${result.stats.updated}\n` +
@@ -198,49 +187,26 @@
 </script>
 
 <div class="page-card">
+
+  <!-- ── Compact header row ─────────────────────────────────────────────── -->
   <div class="page-header">
     <span class="page-icon">📄</span>
     <span class="page-title">Page {page.page}</span>
     <SyncStatusBadge status={page.syncStatus} />
-  </div>
-  
-  <div class="page-meta">
-    <span>Strokes: {page.strokeCount}</span>
-    <span class="separator">│</span>
-    <span>Last Updated: {formatDate(page.lastUpdated)}</span>
-  </div>
-  
-  {#if page.transcriptionText || editedTranscription}
-    <div class="transcription-section">
-      <div class="section-header">
-        <div class="section-label">Transcription:</div>
-        <button 
-          class="edit-structure-btn"
-          on:click={handleOpenEditor}
-          disabled={loadingLines}
-          title="Edit line structure and merge/split lines"
-        >
-          {#if loadingLines}
-            ⏳
-          {:else}
-            ✏️ Edit Structure
-          {/if}
-        </button>
-      </div>
-      <TranscriptionPreview 
-        text={editedTranscription} 
-        editable={true}
-        on:change={handleTranscriptionChange}
-      />
-    </div>
-  {:else}
-    <div class="no-transcription">
-      <em>No transcription data</em>
-    </div>
-  {/if}
-  
-  <div class="page-actions">
-    <button 
+    <span class="spacer"></span>
+
+    {#if hasTranscription}
+      <button
+        class="expand-btn"
+        on:click={() => transcriptExpanded = !transcriptExpanded}
+        title={transcriptExpanded ? 'Collapse transcript' : 'Expand transcript'}
+        aria-expanded={transcriptExpanded}
+      >
+        {transcriptExpanded ? '▼' : '▶'}
+      </button>
+    {/if}
+
+    <button
       class="import-btn"
       on:click={handleImport}
       disabled={importing}
@@ -248,15 +214,46 @@
       {#if importing}
         <span class="spinner">⏳</span>
         {#if importProgress.total > 0}
-          Importing... {importProgress.current}/{importProgress.total}
+          {importProgress.current}/{importProgress.total}
         {:else}
-          Importing...
+          Importing…
         {/if}
       {:else}
         Import Strokes
       {/if}
     </button>
   </div>
+
+  <!-- ── Collapsible transcript section ────────────────────────────────── -->
+  {#if transcriptExpanded && hasTranscription}
+    <div class="transcription-section">
+      <div class="section-header">
+        <span class="section-label">Transcription:</span>
+        <div class="section-actions">
+          <button
+            class="action-btn"
+            on:click={handleOpenEditor}
+            disabled={loadingLines}
+            title="Edit line structure and merge/split lines"
+          >
+            {loadingLines ? '⏳' : 'Edit'}
+          </button>
+          <button
+            class="action-btn action-btn--warning"
+            on:click={handleResetTranscript}
+            title="Reset transcript — removes block associations from strokes so this page can be re-transcribed (LogSeq blocks are not deleted)"
+          >
+            ↺ Reset
+          </button>
+        </div>
+      </div>
+      <TranscriptionPreview
+        text={editedTranscription}
+        on:change={handleTranscriptionChange}
+      />
+    </div>
+  {/if}
+
 </div>
 
 <TranscriptionEditorModal
@@ -269,138 +266,152 @@
 
 <style>
   .page-card {
-    background: transparent;
-    border-radius: 6px;
-    padding: 14px;
-    margin-bottom: 10px;
-    border: none;
-    border-bottom: 2px solid rgba(255, 255, 255, 0.08);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    padding: 10px 14px;
   }
-  
+
   .page-card:last-child {
     border-bottom: none;
-    margin-bottom: 0;
   }
-  
+
+  /* ── Header row ─────────────────────────────────────────────────────── */
+
   .page-header {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
+    gap: 7px;
   }
-  
+
   .page-icon {
-    font-size: 1.2rem;
+    font-size: 1rem;
+    flex-shrink: 0;
   }
-  
+
   .page-title {
     font-weight: 600;
-    font-size: 1rem;
+    font-size: 0.9rem;
     color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .spacer {
     flex: 1;
   }
-  
-  .page-meta {
-    display: flex;
-    gap: 8px;
-    font-size: 0.8rem;
-    color: var(--text-secondary);
-    margin-bottom: 12px;
-  }
-  
-  .separator {
-    color: var(--text-tertiary);
-  }
-  
-  .transcription-section {
-    margin-bottom: 12px;
-  }
-  
-  .section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 6px;
-  }
-  
-  .section-label {
-    font-size: 0.75rem;
-    color: var(--text-tertiary);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-  
-  .edit-structure-btn {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 8px;
-    background: var(--accent);
-    color: white;
+
+  .expand-btn {
+    flex-shrink: 0;
+    background: none;
     border: none;
-    border-radius: 4px;
-    font-size: 0.7rem;
-    cursor: pointer;
-    transition: all 0.2s;
-    opacity: 0.8;
-  }
-  
-  .edit-structure-btn:hover:not(:disabled) {
-    opacity: 1;
-    transform: translateY(-1px);
-  }
-  
-  .edit-structure-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  
-  .no-transcription {
-    padding: 12px;
-    background: rgba(255, 255, 255, 0.03);
-    border-radius: 6px;
+    padding: 2px 5px;
     color: var(--text-tertiary);
-    font-size: 0.875rem;
-    margin-bottom: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    font-size: 0.65rem;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: color 0.15s, background 0.15s;
+    line-height: 1;
   }
-  
-  .page-actions {
-    display: flex;
-    justify-content: flex-start;
+
+  .expand-btn:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.08);
   }
-  
+
   .import-btn {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 8px 16px;
+    gap: 5px;
+    padding: 5px 11px;
     background: var(--accent-color, #2196f3);
     border: none;
-    border-radius: 6px;
+    border-radius: 5px;
     color: white;
     cursor: pointer;
-    font-size: 0.875rem;
+    font-size: 0.78rem;
     font-weight: 500;
-    transition: all 0.2s;
+    transition: opacity 0.2s, transform 0.2s;
+    white-space: nowrap;
   }
-  
+
   .import-btn:hover:not(:disabled) {
-    opacity: 0.9;
+    opacity: 0.88;
     transform: translateY(-1px);
   }
-  
+
   .import-btn:disabled {
-    opacity: 0.6;
+    opacity: 0.55;
     cursor: not-allowed;
   }
-  
+
   .spinner {
     animation: spin 1s linear infinite;
   }
-  
+
   @keyframes spin {
     from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+    to   { transform: rotate(360deg); }
+  }
+
+  /* ── Transcript section ─────────────────────────────────────────────── */
+
+  .transcription-section {
+    margin-top: 8px;
+  }
+
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+
+  .section-label {
+    font-size: 0.7rem;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-right: auto;
+  }
+
+  .section-actions {
+    display: flex;
+    gap: 5px;
+  }
+
+  .action-btn {
+    padding: 3px 9px;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.72rem;
+    font-weight: 500;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+
+  .action-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+    border-color: rgba(255, 255, 255, 0.35);
+  }
+
+  .action-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .action-btn--warning {
+    border-color: var(--warning, #f59e0b);
+    color: var(--warning, #f59e0b);
+  }
+
+  .action-btn--warning:hover:not(:disabled) {
+    background: var(--warning, #f59e0b);
+    color: #1a1a1a;
+    border-color: var(--warning, #f59e0b);
   }
 </style>
