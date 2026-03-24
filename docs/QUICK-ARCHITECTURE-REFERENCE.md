@@ -189,6 +189,20 @@ smartpen/B3017/P42
 
 ### March 2026
 
+#### ✅ Decorative Stroke Filter — Single-stroke Only (2026-03-24)
+Rewrote `src/lib/stroke-filter.js` to detect only individual strokes — no multi-stroke grouping:
+
+- **Removed**: 2-stroke H+V box detection (`detect2StrokeBoxes`) and vertical-line detection
+- **Replaced**: `StrokeAnalyzer`-based rectangle check (fragile corner detection) with two simpler geometric tests:
+  1. **Perimeter fraction** — ≥85% of dots must lie within 1.5mm of a bounding-box edge
+  2. **Path ratio** — `pathLength / 2(w+h)` must be in `[0.80, 1.40]` (circles score ~0.785, spirals > 1.40)
+- **Added**: Explicit closure check in mm (`BOX_MAX_CLOSURE_MM = 5.0`) instead of Ncode units
+- **Type priority fix**: `underline > box > circle` so a closed rectangle isn't mis-labelled as a circle
+
+Detection types remain: underlines (long, straight, horizontal), single-stroke boxes (closed rectangle with content), circles/ovals (closed curve with content).
+
+---
+
 #### ✅ Offline Import Performance (2026-03-19)
 Two changes to `src/lib/pen-sdk.js` to reduce import time for multi-book syncs:
 
@@ -256,7 +270,7 @@ Framework: **Vitest 4.1.1** with happy-dom environment.
 | `src/lib/__tests__/transcript-updater.test.js` | `updateTranscriptBlocks` — validLines filter (Y-bounds gating, empty text), duplicate prevention, dedupedLines index correctness |
 | `src/lib/__tests__/myscript-api.test.js` | `parseMyScriptResponse` — line parsing, Y-bounds calculation, fallback interpolation, indentation, checkbox normalisation |
 | `src/lib/__tests__/transcript-search.test.js` | `tokenize` (hyphen preservation, property filtering), `searchPages` (partial matching, ranking), `highlightMatches` (HTML escaping, mark injection) |
-| `src/lib/__tests__/stroke-filter.test.js` | `filterDecorativeStrokes` — underline/circle/2-stroke-box detection, threshold behaviour, `detectDecorativeIndices` |
+| `src/lib/__tests__/stroke-filter.test.js` | `filterDecorativeStrokes` — underline/circle/single-stroke-box detection (perimeter-fraction + path-ratio), threshold behaviour, `detectDecorativeIndices`, regression for vertical lines and multi-stroke grouping |
 
 ---
 

@@ -1,19 +1,24 @@
 /**
- * Tests for stroke-filter.js — decorative stroke detection.
+ * Tests for stroke-filter.js — decorative stroke detection (single-stroke only).
  *
- * Decorative strokes (boxes, underlines, circles) should be separated from
- * text strokes before handing off to MyScript so they are not mis-recognised
- * as emoji/symbols.
+ * The algorithm detects three types of decorative strokes, all as INDIVIDUAL strokes:
+ *   1. Underlines  — long, straight, horizontal strokes
+ *   2. Single-stroke boxes — closed rectangular strokes with content inside
+ *   3. Circles/ovals — closed curved strokes with content inside
  *
- * All geometry is expressed in Ncode units (1 unit = 2.371 mm).  The helpers
- * below convert from mm to Ncode for readability.
+ * Multi-stroke grouping (the old 2-stroke H+V box) has been removed.
+ * Vertical-line detection has been removed.
+ *
+ * All geometry is expressed in Ncode units (1 unit = 2.371 mm).
+ * Helpers convert from mm → Ncode for readability.
  *
  * Coverage:
- *   - filterDecorativeStrokes: empty input, returns textStrokes + decorativeStrokes + stats
- *   - Underline detection: aspect ratio + straightness + width thresholds
+ *   - filterDecorativeStrokes: empty input, stats shape, text passthrough
+ *   - Underline detection: thresholds, short/vertical rejections
+ *   - Single-stroke box detection: rectangle geometry + content requirement
  *   - Circle detection: closed, large enough, contains content
- *   - 2-stroke box detection: temporal proximity, contains content, non-overlapping
- *   - detectDecorativeIndices: returns correct indices + stats object
+ *   - detectDecorativeIndices: index correctness, agreement with filterDecorativeStrokes
+ *   - Removal of vertical-line and multi-stroke group detection
  */
 
 import { describe, it, expect } from 'vitest';
@@ -28,19 +33,17 @@ const { NCODE_TO_MM } = config;
 const mmToNcode = mm => mm / NCODE_TO_MM;
 
 /**
- * Build a simple horizontal stroke of given width (mm), at the specified y position.
- * A tiny y-wobble (0.1mm) is added to ensure bounds.height > 0.01, which is required
- * by detectUnderlines before it calculates aspect ratio.  Real pen strokes are never
- * perfectly flat, so this matches realistic input.
+ * Build a horizontal stroke of given width (mm).
+ * A tiny y-wobble (0.1 mm) ensures bounds.height > 0 so the aspect-ratio
+ * check can proceed — real handwriting is never perfectly flat.
  */
 function makeHorizontalStroke(startXmm, yMm, widthMm, dotCount = 20, startTime = 1000) {
   const startX = mmToNcode(startXmm);
-  const baseY = mmToNcode(yMm);
-  const wobble = mmToNcode(0.1); // tiny vertical variation — keeps aspect ratio >> 50
-  const endX = mmToNcode(startXmm + widthMm);
-  const dots = Array.from({ length: dotCount }, (_, i) => ({
+  const baseY  = mmToNcode(yMm);
+  const wobble = mmToNcode(0.1);
+  const endX   = mmToNcode(startXmm + widthMm);
+  const dots   = Array.from({ length: dotCount }, (_, i) => ({
     x: startX + (endX - startX) * (i / (dotCount - 1)),
-    // Alternate slightly above/below baseline to get height > 0 while staying very straight
     y: baseY + (i % 2 === 0 ? wobble : -wobble),
     f: 512,
     timestamp: startTime + i
@@ -48,51 +51,64 @@ function makeHorizontalStroke(startXmm, yMm, widthMm, dotCount = 20, startTime =
   return { pageInfo: {}, startTime, endTime: startTime + dotCount, dotArray: dots };
 }
 
-/** Build a simple vertical stroke of given height (mm), at the specified x position */
-function makeVerticalStroke(xMm, startYmm, heightMm, dotCount = 20, startTime = 2000) {
-  const x = mmToNcode(xMm);
-  const startY = mmToNcode(startYmm);
-  const endY = mmToNcode(startYmm + heightMm);
-  const dots = Array.from({ length: dotCount }, (_, i) => ({
-    x,
-    y: startY + (endY - startY) * (i / (dotCount - 1)),
-    f: 512,
-    timestamp: startTime + i
-  }));
-  return { pageInfo: {}, startTime, endTime: startTime + dotCount, dotArray: dots };
-}
-
-/**
- * Build a closed approximately-circular stroke (polygon approximation).
- * diameterMm controls size; centreX/Y are in mm.
- */
+/** Build a closed approximately-circular stroke (polygon approximation). */
 function makeCircleStroke(centreMm, diameterMm, dotCount = 60, startTime = 5000) {
   const [cx, cy] = centreMm.map(mmToNcode);
   const r = mmToNcode(diameterMm / 2);
-  // Close the loop by repeating the first point at the end
   const dots = Array.from({ length: dotCount + 1 }, (_, i) => {
     const angle = (2 * Math.PI * i) / dotCount;
-    return {
-      x: cx + r * Math.cos(angle),
-      y: cy + r * Math.sin(angle),
-      f: 512,
-      timestamp: startTime + i
-    };
+    return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle), f: 512, timestamp: startTime + i };
   });
   return { pageInfo: {}, startTime, endTime: startTime + dotCount, dotArray: dots };
 }
 
 /**
- * Build a small text-like stroke (a short wiggle) that fits inside a box/circle.
- * cx/cy in mm.
+ * Build a closed single-stroke rectangle starting and ending at the MIDPOINT
+ * of the top edge.  Drawing order: midTop → TR → BR → BL → TL → midTop.
+ *
+ * All 4 corners (TR, BR, BL, TL) land near 1/5, 2/5, 3/5, 4/5 of the stroke,
+ * well inside StrokeAnalyzer's sliding corner-detection window (which cannot
+ * see changes within `windowSize` dots of either end).
+ * wMm × hMm box, top-left at (x0Mm, y0Mm).
  */
+function makeRectStroke(x0Mm, y0Mm, wMm, hMm, dotsPerSide = 15, startTime = 8000) {
+  const x0  = mmToNcode(x0Mm);
+  const y0  = mmToNcode(y0Mm);
+  const x1  = mmToNcode(x0Mm + wMm);
+  const y1  = mmToNcode(y0Mm + hMm);
+  const xMid = (x0 + x1) / 2;
+
+  let ts = startTime;
+  function seg(ax, ay, bx, by) {
+    return Array.from({ length: dotsPerSide }, (_, i) => ({
+      x: ax + (bx - ax) * (i / (dotsPerSide - 1)),
+      y: ay + (by - ay) * (i / (dotsPerSide - 1)),
+      f: 512,
+      timestamp: ts++
+    }));
+  }
+
+  // Start mid-top so all 4 corners sit well within the stroke body
+  const dots = [
+    ...seg(xMid, y0, x1,  y0),   // right half of top  (midTop → TR)
+    ...seg(x1,   y0, x1,  y1),   // right edge          (TR → BR)
+    ...seg(x1,   y1, x0,  y1),   // bottom edge         (BR → BL)
+    ...seg(x0,   y1, x0,  y0),   // left edge           (BL → TL)
+    ...seg(x0,   y0, xMid, y0),  // left half of top    (TL → midTop)
+    { x: xMid, y: y0, f: 512, timestamp: ts }  // close
+  ];
+
+  return { pageInfo: {}, startTime, endTime: startTime + dots.length, dotArray: dots };
+}
+
+/** Small text-like stroke at a given position (mm). */
 function makeTextStroke(cxMm, cyMm, startTime = 3000) {
   const cx = mmToNcode(cxMm);
   const cy = mmToNcode(cyMm);
   const dots = [
     { x: cx,       y: cy,       f: 512, timestamp: startTime },
     { x: cx + 0.5, y: cy + 0.5, f: 512, timestamp: startTime + 1 },
-    { x: cx + 1,   y: cy,       f: 512, timestamp: startTime + 2 },
+    { x: cx + 1,   y: cy,       f: 512, timestamp: startTime + 2 }
   ];
   return { pageInfo: {}, startTime, endTime: startTime + 3, dotArray: dots };
 }
@@ -111,19 +127,13 @@ describe('filterDecorativeStrokes — empty / passthrough', () => {
 
   it('returns empty arrays and zero stats for empty array', () => {
     const result = filterDecorativeStrokes([]);
-    expect(result.textStrokes).toHaveLength(0);
-    expect(result.decorativeStrokes).toHaveLength(0);
     expect(result.stats.boxes).toBe(0);
     expect(result.stats.underlines).toBe(0);
     expect(result.stats.circles).toBe(0);
   });
 
-  it('passes through text strokes with no decorative elements', () => {
-    const strokes = [
-      makeTextStroke(10, 20, 1000),
-      makeTextStroke(15, 25, 2000),
-      makeTextStroke(20, 30, 3000)
-    ];
+  it('passes through plain text strokes unchanged', () => {
+    const strokes = [makeTextStroke(10, 20), makeTextStroke(15, 25), makeTextStroke(20, 30)];
     const result = filterDecorativeStrokes(strokes);
     expect(result.textStrokes).toHaveLength(3);
     expect(result.decorativeStrokes).toHaveLength(0);
@@ -132,7 +142,7 @@ describe('filterDecorativeStrokes — empty / passthrough', () => {
     expect(result.stats.decorative).toBe(0);
   });
 
-  it('stats fields are always present in result', () => {
+  it('result always has the expected stats shape', () => {
     const result = filterDecorativeStrokes([makeTextStroke(10, 10)]);
     expect(result.stats).toMatchObject({
       total: expect.any(Number),
@@ -151,10 +161,9 @@ describe('filterDecorativeStrokes — empty / passthrough', () => {
 
 describe('filterDecorativeStrokes — underline detection', () => {
   it('detects a long, straight, horizontal stroke as an underline', () => {
-    // 40mm wide (> UNDERLINE_MIN_WIDTH=15), at a y position, very straight
     const underline = makeHorizontalStroke(10, 50, 40, 30, 1000);
-    const text1 = makeTextStroke(20, 48, 4000);
-    const text2 = makeTextStroke(25, 48, 5000);
+    const text1     = makeTextStroke(20, 48, 4000);
+    const text2     = makeTextStroke(25, 48, 5000);
 
     const result = filterDecorativeStrokes([underline, text1, text2]);
 
@@ -163,33 +172,100 @@ describe('filterDecorativeStrokes — underline detection', () => {
     expect(result.decorativeStrokes[0].type).toBe('underline');
   });
 
-  it('does NOT flag a short horizontal stroke as an underline', () => {
-    // 5mm wide — below UNDERLINE_MIN_WIDTH=15
-    const shortHorizontal = makeHorizontalStroke(10, 50, 5, 15, 1000);
-    const result = filterDecorativeStrokes([shortHorizontal]);
-    expect(result.stats.underlines).toBe(0);
+  it('does NOT flag a short horizontal stroke as an underline (below min width)', () => {
+    // 5mm — below UNDERLINE_MIN_WIDTH=15mm
+    const shortH = makeHorizontalStroke(10, 50, 5, 15, 1000);
+    expect(filterDecorativeStrokes([shortH]).stats.underlines).toBe(0);
   });
 
   it('does NOT flag a vertical stroke as an underline', () => {
-    const vertical = makeVerticalStroke(10, 10, 30, 20, 1000);
-    const result = filterDecorativeStrokes([vertical]);
-    expect(result.stats.underlines).toBe(0);
+    // Vertical stroke: width ≈ 0, height >> 0 → aspect ratio ≈ 0 < 50
+    const x = mmToNcode(10);
+    const dots = Array.from({ length: 20 }, (_, i) => ({
+      x, y: mmToNcode(10 + i * 1.5), f: 512, timestamp: 1000 + i
+    }));
+    const vertical = { pageInfo: {}, startTime: 1000, endTime: 1020, dotArray: dots };
+    expect(filterDecorativeStrokes([vertical]).stats.underlines).toBe(0);
   });
 
-  it('does NOT flag a stroke with too few dots as an underline', () => {
-    // Only 5 dots — below the implicit minimum
+  it('does NOT flag a stroke with too few dots', () => {
+    // 5 dots — below the minimum of 10
     const sparse = makeHorizontalStroke(10, 50, 40, 5, 1000);
-    const result = filterDecorativeStrokes([sparse]);
-    expect(result.stats.underlines).toBe(0);
+    expect(filterDecorativeStrokes([sparse]).stats.underlines).toBe(0);
   });
 
-  it('underline stroke is excluded from textStrokes', () => {
-    const underline = makeHorizontalStroke(10, 50, 40, 30, 1000);
+  it('excludes the underline from textStrokes', () => {
+    const underline  = makeHorizontalStroke(10, 50, 40, 30, 1000);
     const textStroke = makeTextStroke(20, 48, 4000);
     const result = filterDecorativeStrokes([underline, textStroke]);
-    // textStrokes should contain only the real text stroke
     expect(result.textStrokes).toHaveLength(1);
     expect(result.textStrokes[0]).toBe(textStroke);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Single-stroke box detection
+// ---------------------------------------------------------------------------
+
+describe('filterDecorativeStrokes — single-stroke box detection', () => {
+  it('detects a closed rectangular stroke with content inside as a box', () => {
+    // 20mm × 15mm box; content strokes placed near the centre
+    const box  = makeRectStroke(10, 10, 20, 15, 15, 8000);
+    const txt1 = makeTextStroke(18, 17, 20000);
+    const txt2 = makeTextStroke(22, 17, 21000);
+
+    const result = filterDecorativeStrokes([box, txt1, txt2]);
+
+    expect(result.stats.boxes).toBe(1);
+    expect(result.decorativeStrokes).toHaveLength(1);
+    expect(result.decorativeStrokes[0].type).toBe('box');
+  });
+
+  it('does NOT detect a rectangular stroke with no content inside', () => {
+    const box = makeRectStroke(10, 10, 20, 15, 15, 8000);
+    // No strokes inside
+    expect(filterDecorativeStrokes([box]).stats.boxes).toBe(0);
+    // The box stroke itself should be passed through as text
+    expect(filterDecorativeStrokes([box]).textStrokes).toHaveLength(1);
+  });
+
+  it('does NOT detect a rectangular stroke with only 1 content stroke (requires ≥2)', () => {
+    const box  = makeRectStroke(10, 10, 20, 15, 15, 8000);
+    const txt1 = makeTextStroke(18, 17, 20000);
+    expect(filterDecorativeStrokes([box, txt1]).stats.boxes).toBe(0);
+  });
+
+  it('does NOT detect a box that is too small', () => {
+    // 3mm × 3mm — below BOX_MIN_SIZE=5mm
+    const tinyBox = makeRectStroke(10, 10, 3, 3, 15, 8000);
+    const txt1 = makeTextStroke(11, 11, 20000);
+    const txt2 = makeTextStroke(12, 12, 21000);
+    expect(filterDecorativeStrokes([tinyBox, txt1, txt2]).stats.boxes).toBe(0);
+  });
+
+  it('excludes the box stroke from textStrokes', () => {
+    const box  = makeRectStroke(10, 10, 20, 15, 15, 8000);
+    const txt1 = makeTextStroke(18, 17, 20000);
+    const txt2 = makeTextStroke(22, 17, 21000);
+    const result = filterDecorativeStrokes([box, txt1, txt2]);
+    expect(result.textStrokes).toHaveLength(2);
+    expect(result.textStrokes).toContain(txt1);
+    expect(result.textStrokes).toContain(txt2);
+  });
+
+  it('does NOT treat a 2-stroke H+V pair as a box (multi-stroke grouping removed)', () => {
+    // Old algorithm would have combined these; new algorithm must NOT
+    const hStroke = makeHorizontalStroke(10, 10, 20, 20, 1000);
+    const vDots   = Array.from({ length: 20 }, (_, i) => ({
+      x: mmToNcode(10), y: mmToNcode(10 + i * 1), f: 512, timestamp: 1500 + i
+    }));
+    const vStroke = { pageInfo: {}, startTime: 1500, endTime: 1520, dotArray: vDots };
+    const txt1 = makeTextStroke(15, 15, 5000);
+    const txt2 = makeTextStroke(16, 16, 6000);
+
+    const result = filterDecorativeStrokes([hStroke, vStroke, txt1, txt2]);
+    // Neither the horizontal nor the vertical stroke is a closed rectangle on its own
+    expect(result.stats.boxes).toBe(0);
   });
 });
 
@@ -200,107 +276,38 @@ describe('filterDecorativeStrokes — underline detection', () => {
 describe('filterDecorativeStrokes — circle detection', () => {
   it('detects a closed circle that contains content strokes', () => {
     const circle = makeCircleStroke([50, 50], 20, 60, 10000);
-    // Place text inside the circle (50mm centre, 10mm radius → 45-55mm)
-    const insideText1 = makeTextStroke(48, 49, 20000);
-    const insideText2 = makeTextStroke(51, 51, 21000);
+    const inside1 = makeTextStroke(48, 49, 20000);
+    const inside2 = makeTextStroke(51, 51, 21000);
 
-    const result = filterDecorativeStrokes([circle, insideText1, insideText2]);
+    const result = filterDecorativeStrokes([circle, inside1, inside2]);
     expect(result.stats.circles).toBe(1);
     expect(result.decorativeStrokes[0].type).toBe('circle');
   });
 
   it('does NOT detect a circle with no content inside', () => {
     const circle = makeCircleStroke([50, 50], 20, 60, 10000);
-    // No strokes inside
     const result = filterDecorativeStrokes([circle]);
     expect(result.stats.circles).toBe(0);
-    expect(result.textStrokes).toHaveLength(1); // circle kept as text stroke
+    expect(result.textStrokes).toHaveLength(1);
   });
 
-  it('does NOT detect a very small circle (smaller than a letter)', () => {
+  it('does NOT detect a very small circle (below CIRCLE_MIN_SIZE)', () => {
     // 2mm — below CIRCLE_MIN_SIZE=4mm
-    const tiny = makeCircleStroke([50, 50], 2, 60, 10000);
+    const tiny   = makeCircleStroke([50, 50], 2, 60, 10000);
     const inside = makeTextStroke(50, 50, 20000);
-    const result = filterDecorativeStrokes([tiny, inside]);
-    expect(result.stats.circles).toBe(0);
+    expect(filterDecorativeStrokes([tiny, inside]).stats.circles).toBe(0);
   });
 
   it('does NOT detect an open curve as a circle', () => {
-    // Create a stroke that is circular in shape but not closed
-    const cx = mmToNcode(50);
-    const cy = mmToNcode(50);
-    const r = mmToNcode(10);
+    const cx = mmToNcode(50), cy = mmToNcode(50), r = mmToNcode(10);
+    // 270° arc — not closed
     const dots = Array.from({ length: 60 }, (_, i) => {
-      // Only go 270 degrees — leave a gap
       const angle = (1.5 * Math.PI * i) / 59;
       return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle), f: 512, timestamp: 10000 + i };
     });
     const openCurve = { pageInfo: {}, startTime: 10000, endTime: 10060, dotArray: dots };
     const inside = makeTextStroke(50, 50, 20000);
-    const result = filterDecorativeStrokes([openCurve, inside]);
-    expect(result.stats.circles).toBe(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 2-stroke box detection
-// ---------------------------------------------------------------------------
-
-describe('filterDecorativeStrokes — 2-stroke box detection', () => {
-  it('detects a horizontal+vertical pair drawn close in time with content inside', () => {
-    // A 20mm × 20mm box drawn as two strokes
-    // Horizontal top: from (10,10) to (30,10) in mm
-    const hStroke = makeHorizontalStroke(10, 10, 20, 20, 1000);
-    // Vertical side: from (10,10) to (10,30) in mm — drawn immediately after
-    const vStroke = makeVerticalStroke(10, 10, 20, 20, 1500);
-    // Content inside the box
-    const text1 = makeTextStroke(15, 15, 5000);
-    const text2 = makeTextStroke(20, 18, 6000);
-
-    const result = filterDecorativeStrokes([hStroke, vStroke, text1, text2]);
-    expect(result.stats.boxes).toBeGreaterThanOrEqual(1);
-    expect(result.decorativeStrokes.some(d => d.type === 'box')).toBe(true);
-  });
-
-  it('does NOT detect a box when no content strokes are inside', () => {
-    const hStroke = makeHorizontalStroke(10, 10, 20, 20, 1000);
-    const vStroke = makeVerticalStroke(10, 10, 20, 20, 1500);
-    // No content inside
-    const result = filterDecorativeStrokes([hStroke, vStroke]);
-    expect(result.stats.boxes).toBe(0);
-  });
-
-  it('does NOT detect a box when strokes are too far apart in time', () => {
-    const hStroke = makeHorizontalStroke(10, 10, 20, 20, 1000);
-    // 10 seconds later — above BOX_TIME_THRESHOLD=5000ms
-    const vStroke = makeVerticalStroke(10, 10, 20, 20, 11000);
-    const text1 = makeTextStroke(15, 15, 20000);
-    const text2 = makeTextStroke(20, 18, 21000);
-    const result = filterDecorativeStrokes([hStroke, vStroke, text1, text2]);
-    expect(result.stats.boxes).toBe(0);
-  });
-
-  it('does NOT detect a box when dimensions are too small', () => {
-    // 3mm × 3mm — below BOX_MIN_SIZE=5mm
-    const hStroke = makeHorizontalStroke(10, 10, 3, 20, 1000);
-    const vStroke = makeVerticalStroke(10, 10, 3, 20, 1500);
-    const text1 = makeTextStroke(11, 11, 5000);
-    const text2 = makeTextStroke(12, 12, 6000);
-    const result = filterDecorativeStrokes([hStroke, vStroke, text1, text2]);
-    expect(result.stats.boxes).toBe(0);
-  });
-
-  it('box strokes are removed from textStrokes', () => {
-    const hStroke = makeHorizontalStroke(10, 10, 20, 20, 1000);
-    const vStroke = makeVerticalStroke(10, 10, 20, 20, 1500);
-    const text1 = makeTextStroke(15, 15, 5000);
-    const text2 = makeTextStroke(20, 18, 6000);
-
-    const result = filterDecorativeStrokes([hStroke, vStroke, text1, text2]);
-    // textStrokes should only contain the actual content strokes
-    expect(result.textStrokes).toHaveLength(2);
-    expect(result.textStrokes).toContain(text1);
-    expect(result.textStrokes).toContain(text2);
+    expect(filterDecorativeStrokes([openCurve, inside]).stats.circles).toBe(0);
   });
 });
 
@@ -320,46 +327,55 @@ describe('detectDecorativeIndices', () => {
     });
   });
 
-  it('returns correct indices for detected underlines', () => {
+  it('identifies the correct index for a detected underline', () => {
+    const text     = makeTextStroke(20, 20, 4000);
     const underline = makeHorizontalStroke(10, 50, 40, 30, 1000);
-    const text1 = makeTextStroke(20, 20, 4000);
-    const text2 = makeTextStroke(25, 25, 5000);
 
-    const result = detectDecorativeIndices([underline, text1, text2]);
-    // Index 0 should be the underline
-    expect(result.indices).toContain(0);
+    const result = detectDecorativeIndices([text, underline]);
+    // underline is at index 1
+    expect(result.indices).toContain(1);
     expect(result.stats.underlines).toBe(1);
   });
 
-  it('stats object has boxes, underlines, and circles fields', () => {
+  it('stats object always has boxes, underlines, and circles', () => {
     const result = detectDecorativeIndices([makeTextStroke(10, 10)]);
     expect(result.stats).toMatchObject({
-      boxes: expect.any(Number),
+      boxes:      expect.any(Number),
       underlines: expect.any(Number),
-      circles: expect.any(Number)
+      circles:    expect.any(Number)
     });
   });
 
-  it('returns indices that match filterDecorativeStrokes decorativeStrokes', () => {
+  it('agrees with filterDecorativeStrokes on which indices are decorative', () => {
     const underline = makeHorizontalStroke(10, 50, 40, 30, 1000);
-    const text1 = makeTextStroke(20, 20, 4000);
+    const text1     = makeTextStroke(20, 20, 4000);
 
     const filterResult = filterDecorativeStrokes([underline, text1]);
-    const indexResult = detectDecorativeIndices([underline, text1]);
+    const indexResult  = detectDecorativeIndices([underline, text1]);
 
-    const decorativeIndicesFromFilter = filterResult.decorativeStrokes.map(d => d.index);
-    // Both APIs should agree on which indices are decorative
-    decorativeIndicesFromFilter.forEach(idx => {
-      expect(indexResult.indices).toContain(idx);
-    });
+    const decorativeFromFilter = filterResult.decorativeStrokes.map(d => d.index);
+    decorativeFromFilter.forEach(idx => expect(indexResult.indices).toContain(idx));
   });
 
   it('returns no indices when all strokes are plain text', () => {
-    const strokes = [
-      makeTextStroke(10, 20, 1000),
-      makeTextStroke(15, 25, 2000)
-    ];
-    const result = detectDecorativeIndices(strokes);
-    expect(result.indices).toHaveLength(0);
+    const strokes = [makeTextStroke(10, 20), makeTextStroke(15, 25)];
+    expect(detectDecorativeIndices(strokes).indices).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: vertical line is NOT flagged
+// ---------------------------------------------------------------------------
+
+describe('regression — vertical lines are not flagged', () => {
+  it('a tall, narrow vertical stroke is not classified as decorative', () => {
+    const x = mmToNcode(10);
+    const dots = Array.from({ length: 20 }, (_, i) => ({
+      x, y: mmToNcode(10 + i * 2), f: 512, timestamp: 1000 + i
+    }));
+    const vertical = { pageInfo: {}, startTime: 1000, endTime: 1020, dotArray: dots };
+    const result = filterDecorativeStrokes([vertical]);
+    expect(result.decorativeStrokes).toHaveLength(0);
+    expect(result.textStrokes).toHaveLength(1);
   });
 });
