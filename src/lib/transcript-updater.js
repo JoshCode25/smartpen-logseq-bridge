@@ -596,17 +596,19 @@ export async function updateTranscriptBlocks(book, page, allStrokes, newTranscri
       };
     });
 
-    // CRITICAL FIX: Filter out lines with invalid Y-bounds (0.0-0.0)
-    // These indicate lines that couldn't be matched to strokes, likely due to:
-    // - Stale transcription data from previous session
-    // - Lines for strokes that already have blockUuid (shouldn't happen, but defensive)
+    // Filter out lines with invalid Y-bounds (0.0-0.0) or empty text.
+    // Y-bounds validity is the primary check — stroke ID matching is used for block
+    // associations but must NOT gate whether a line is saved (unit mismatch between
+    // MyScript pixel/mm space and Ncode mm space can produce empty strokeId sets for
+    // perfectly valid lines).
     const validLines = linesWithStrokeIds.filter((line, i) => {
-      const isValid = line.yBounds &&
-                     (line.yBounds.minY !== 0 || line.yBounds.maxY !== 0) &&
-                     line.strokeIds && line.strokeIds.size > 0;
+      const hasValidBounds = line.yBounds &&
+                             (line.yBounds.minY !== 0 || line.yBounds.maxY !== 0);
+      const hasText = line.text && line.text.trim().length > 0;
+      const isValid = hasValidBounds && hasText;
 
       if (!isValid) {
-        console.warn(`Skipping line ${i}: "${line.text?.substring(0, 50)}..." - no valid Y-bounds or strokes`);
+        console.warn(`Skipping line ${i}: "${line.text?.substring(0, 50)}..." - no valid Y-bounds or empty text`);
       }
 
       return isValid;
@@ -614,8 +616,50 @@ export async function updateTranscriptBlocks(book, page, allStrokes, newTranscri
 
     console.log(`Processing ${validLines.length}/${linesWithStrokeIds.length} valid NEW lines from untranscribed strokes`);
 
+    // Duplicate prevention: fetch existing transcript blocks and skip lines whose
+    // canonical text already exists. This prevents duplicate transcript runs when
+    // updateTranscriptBlocks is called more than once for the same page content.
+    let existingCanonicals = new Set();
+    try {
+      const existingBlocks = await getTranscriptBlocks(book, page, host, token);
+      if (existingBlocks.length > 0) {
+        console.log(`Found ${existingBlocks.length} existing transcript blocks — checking for duplicates`);
+        existingBlocks.forEach(b => {
+          // Compare against both the stored canonical-transcript property (if present)
+          // and the raw block text (stripped of property lines).
+          const propCanonical = b.properties?.['canonical-transcript'];
+          if (propCanonical) existingCanonicals.add(propCanonical.trim().toLowerCase());
+          if (b.content) {
+            const rawText = b.content
+              .replace(/^-\s*/, '')
+              .replace(/\n[\w-]+::.*$/gm, '')
+              .trim()
+              .toLowerCase();
+            if (rawText) existingCanonicals.add(rawText);
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('Could not fetch existing blocks for duplicate check:', e.message);
+    }
+
+    const dedupedLines = existingCanonicals.size > 0
+      ? validLines.filter((line, i) => {
+          const canonical = (line.canonical || line.text || '').trim().toLowerCase();
+          if (existingCanonicals.has(canonical)) {
+            console.log(`Skipping duplicate line ${i}: "${line.text?.substring(0, 40)}..."`);
+            return false;
+          }
+          return true;
+        })
+      : validLines;
+
+    if (dedupedLines.length < validLines.length) {
+      console.log(`Duplicate check removed ${validLines.length - dedupedLines.length} already-saved lines`);
+    }
+
     // Build CREATE actions for valid new lines only (append-only - no UPDATE/SKIP/DELETE)
-    const actions = validLines.map((line, i) => ({
+    const actions = dedupedLines.map((line, i) => ({
       type: 'CREATE',
       lineIndex: i,
       line: line,
@@ -724,7 +768,7 @@ export async function updateTranscriptBlocks(book, page, allStrokes, newTranscri
       const linesWithBlocks = results
         .filter(r => r.type === 'created')
         .map(r => {
-          const line = linesWithStrokeIds[r.lineIndex];
+          const line = dedupedLines[r.lineIndex];
           if (!line || !line.yBounds) return null;
 
           return {
