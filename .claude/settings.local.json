@@ -8,7 +8,10 @@
       "Bash(ls:*)",
       "Bash(npm run build:*)",
       "mcp__filesystem__list_directory",
-      "Bash(npm test:*)"
+      "Bash(npm test:*)",
+      "Bash(npx vite:*)",
+      "Bash(grep -r \"navPage\\\\|data-on-click\" 'C:\\\\Users\\\\joshg\\\\Documents\\\\Claude Access\\\\LogSeq Plugins\\\\logseq-plugin-excalidraw/src' --include=*.ts --include=*.tsx)",
+      "Bash(grep -r \"max-width\\\\|max-height\\\\|aspect-ratio\" 'C:/Users/joshg/Documents/Claude Access/LogSeq Plugins/logseq-plugin-excalidraw/src' --include=*.ts --include=*.tsx --include=*.css)"
     ]
   }
 }

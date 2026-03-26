@@ -225,7 +225,31 @@ export function adjustSelectionAfterDeletion(removedIndices) {
         newSel.add(index - shift);
       }
     });
-    
+
     return newSel;
   });
+}
+
+/**
+ * Get the Ncode bounding box of currently selected strokes.
+ * Returns { minX, minY, maxX, maxY } or null if no selection.
+ */
+export function getSelectedBounds() {
+  const indices = get(selectedIndices);
+  const allStrokes = get(strokes);
+  if (indices.size === 0) return null;
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const i of indices) {
+    const stroke = allStrokes[i];
+    if (!stroke || !stroke.dotArray) continue;
+    for (const dot of stroke.dotArray) {
+      if (dot.x < minX) minX = dot.x;
+      if (dot.y < minY) minY = dot.y;
+      if (dot.x > maxX) maxX = dot.x;
+      if (dot.y > maxY) maxY = dot.y;
+    }
+  }
+  if (minX === Infinity) return null;
+  return { minX, minY, maxX, maxY };
 }

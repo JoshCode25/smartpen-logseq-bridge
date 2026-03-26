@@ -18,8 +18,9 @@
   import { bookAliases } from '$stores';
   import { formatBookName, filterTranscriptionProperties } from '$utils/formatting.js';
   import { openSearchTranscriptsDialog, openSvgExportDialog } from '$stores';
-  import { hasSelection } from '$stores/selection.js';
+  import { hasSelection, getSelectedBounds } from '$stores/selection.js';
   import { logseqConnected } from '$stores';
+  import { copyStrokesAsExcalidraw, generateSketchMacro } from '$lib/excalidraw-export.js';
   import CanvasControls from './CanvasControls.svelte';
   import PageSelector from './PageSelector.svelte';
   import FilteredStrokesPanel from '../strokes/FilteredStrokesPanel.svelte';
@@ -1075,6 +1076,34 @@
     downloadFile(json, 'strokes.json', 'application/json');
   }
 
+  async function copySketchMacro() {
+    if (!$hasSelection) return;
+    const bounds = getSelectedBounds();
+    if (!bounds) { log('No stroke bounds found', 'warning'); return; }
+    // Determine page name from selected strokes
+    const firstStroke = $selectedStrokes[0];
+    if (!firstStroke?.pageInfo) { log('Selected strokes have no page info', 'warning'); return; }
+    const { book, page } = firstStroke.pageInfo;
+    const pageName = `smartpen/B${book}/P${page}`;
+    const macro = generateSketchMacro(pageName, bounds);
+    try {
+      await navigator.clipboard.writeText(macro);
+      log(`Sketch macro copied: ${macro}`, 'success');
+    } catch (err) {
+      log('Failed to copy macro to clipboard', 'error');
+    }
+  }
+
+  async function copyForExcalidraw() {
+    if (!$hasSelection) return;
+    try {
+      await copyStrokesAsExcalidraw($selectedStrokes);
+      log(`${$selectionCount} strokes copied for Excalidraw`, 'success');
+    } catch (err) {
+      log('Failed to copy Excalidraw data', 'error');
+    }
+  }
+
   function downloadFile(content, filename, mimeType) {
     const blob = new Blob([content], { type: mimeType });
     const url = URL.createObjectURL(blob);
@@ -1300,12 +1329,26 @@
       </button>
       
       {#if $selectionCount > 0}
-        <button 
-          class="header-btn duplicate-btn" 
+        <button
+          class="header-btn duplicate-btn"
           on:click={handleDuplicate}
           title="Duplicate selected strokes (Ctrl+D)"
         >
           🔄 Duplicate
+        </button>
+        <button
+          class="header-btn"
+          on:click={copySketchMacro}
+          title="Copy LogSeq sketch renderer macro for selected strokes"
+        >
+          📋 Sketch Macro
+        </button>
+        <button
+          class="header-btn"
+          on:click={copyForExcalidraw}
+          title="Copy selected strokes as Excalidraw clipboard data"
+        >
+          ✏️ Excalidraw
         </button>
       {/if}
       
