@@ -377,6 +377,7 @@ function processMessage(mac, type, args) {
       break;
       
     case PenMessageType.OFFLINE_DATA_SEND_STATUS:
+      lastStatusPercentage = args; // cumulative % — used to estimate total stroke count
       // Only log every 25% to reduce noise
       if (args % 25 < 5 || args > 95) {
         console.log(`📊 Progress: ${Math.round(args)}%`);
@@ -386,20 +387,26 @@ function processMessage(mac, type, args) {
       
     case PenMessageType.OFFLINE_DATA_SEND_SUCCESS:
       console.log('%c✅ OFFLINE_DATA_SEND_SUCCESS - Processing data...', 'background: #2196F3; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold;');
-      handleOfflineDataReceived(args);
-      // Resolve immediately — SDK has confirmed successful delivery of all data.
-      // The idle timeout in the transfer loop acts as a fallback only.
-      if (offlineTransferResolver) {
-        offlineTransferResolver({ success: true });
+      // handleOfflineDataReceived returns false on book ID mismatch — in that case
+      // we leave the resolver live so the correct book's data can still resolve it.
+      if (handleOfflineDataReceived(args) && offlineTransferResolver) {
+        // Resolve immediately — SDK has confirmed successful delivery of all data.
+        // Clear resolver BEFORE calling to prevent retransmitted BLE events from
+        // resolving the NEXT book's promise once the loop advances.
+        const resolver = offlineTransferResolver;
+        offlineTransferResolver = null;
+        resolver({ success: true });
       }
       break;
-      
+
     case PenMessageType.OFFLINE_DATA_SEND_FAILURE:
       console.log('%c❌ OFFLINE_DATA_SEND_FAILURE', 'background: #f44336; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold;');
       log('Failed to receive offline data', 'error');
       // Resolve the pending transfer with failure so we can move to the next book
       if (offlineTransferResolver) {
-        offlineTransferResolver({ failed: true });
+        const resolver = offlineTransferResolver;
+        offlineTransferResolver = null;
+        resolver({ failed: true });
       }
       break;
       
@@ -511,6 +518,14 @@ let dataReceivedForCurrentTransfer = false;  // Track if we've received ANY data
 let transferStartTime = null;        // Track when transfer started for timing info
 let transferCancelled = false;       // Flag to cancel transfer
 let elapsedTimerInterval = null;     // Timer to update elapsed seconds
+// Per-book chunk tracking: the pen sends one OFFLINE_DATA_SEND_SUCCESS per PAGE,
+// not per book. We estimate the total from the first STATUS percentage and keep
+// waiting until cumulative received >= estimated total before resolving.
+// Note: OFFLINE_DATA_RESPONSE (type 49) is handled internally by the SDK and is
+// NOT passed to our messageCallback, so we cannot use it directly.
+let expectedStrokesForCurrentTransfer = 0;  // estimated from STATUS %
+let receivedStrokesForCurrentTransfer = 0;  // matched strokes received so far
+let lastStatusPercentage = 0;               // latest OFFLINE_DATA_SEND_STATUS %
 
 // Configuration for timeouts (can be adjusted based on experience)
 const TRANSFER_CONFIG = {
@@ -527,7 +542,9 @@ export function cancelOfflineTransfer() {
   if (pendingOfflineTransfer && offlineTransferResolver) {
     console.log('%c❌ Transfer cancelled by user', 'background: #f44336; color: white; padding: 2px 6px; border-radius: 3px;');
     transferCancelled = true;
-    offlineTransferResolver({ cancelled: true });
+    const resolver = offlineTransferResolver;
+    offlineTransferResolver = null;
+    resolver({ cancelled: true });
     return true;
   }
   return false;
@@ -680,17 +697,25 @@ function handleOfflineDataResponse(args) {
     const byteCount = args?.bytes;
     
     console.log(`📊 Book ${pendingOfflineTransfer}: Pen reports ${strokeCount || 0} strokes (${byteCount || 'unknown'} bytes)`);
-    
+
+    // Store expected count so handleOfflineDataReceived knows when all chunks arrived.
+    // The pen sends one OFFLINE_DATA_SEND_SUCCESS per page, so we must accumulate.
+    if (strokeCount > 0) {
+      expectedStrokesForCurrentTransfer = strokeCount;
+    }
+
     // Update status to receiving
     updateTransferProgress({
       status: 'receiving'
     });
-    
+
     // If stroke count is 0, resolve immediately
     if (strokeCount === 0) {
       console.log(`📋 Book ${pendingOfflineTransfer} has 0 strokes - resolving immediately`);
       if (offlineTransferResolver) {
-        offlineTransferResolver({ empty: true });
+        const resolver = offlineTransferResolver;
+        offlineTransferResolver = null;
+        resolver({ empty: true });
       }
     }
   } else {
@@ -811,11 +836,16 @@ async function handleOfflineNoteList(noteList) {
       // Reset per-transfer state
       dataReceivedForCurrentTransfer = false;
       lastDataReceivedTime = null;
+      expectedStrokesForCurrentTransfer = 0;
+      receivedStrokesForCurrentTransfer = 0;
+      lastStatusPercentage = 0;
       
-      // Update progress for this book
+      // Update progress for this book (reset per-book counters for clean display)
       updateTransferProgress({
         currentBook: i + 1,
-        status: 'requesting'
+        status: 'requesting',
+        currentBookStrokes: 0,
+        expectedStrokes: 0
       });
       
       // Create a promise that resolves when this transfer completes
@@ -972,7 +1002,7 @@ function handleOfflineDataReceived(data) {
   
   if (!Array.isArray(data)) {
     console.error('❌ Data is not an array!', data);
-    return;
+    return false;
   }
   
   const convertedStrokes = [];
@@ -1074,14 +1104,17 @@ function handleOfflineDataReceived(data) {
   if (deletionMode) {
     console.log(`🗑️ DELETION MODE - Skipping addOfflineStrokes() to discard data`);
     
-    // Resolve the pending transfer (deletion successful)
+    // Resolve the pending transfer (deletion successful).
+    // Return false so processMessage doesn't attempt a second resolution.
     if (offlineTransferResolver) {
-      offlineTransferResolver({ deleted: true });
+      const resolver = offlineTransferResolver;
+      offlineTransferResolver = null;
+      resolver({ deleted: true });
     }
-    
+
     log(`🗑️ Deleted ${convertedStrokes.length} strokes from pen (data discarded)`, 'success');
     console.log('%c===== END DELETION DATA PROCESSING =====', 'background: #f59e0b; color: white; font-size: 14px; padding: 4px;');
-    return; // Exit early - don't continue with progress tracking
+    return false; // Exit early — resolver already called above
   } else {
     // Normal import - add strokes to store
     addOfflineStrokes(convertedStrokes);
@@ -1094,24 +1127,55 @@ function handleOfflineDataReceived(data) {
   
   // Track progress - running stroke total
   if (detectedBook && pendingOfflineTransfer && detectedBook === pendingOfflineTransfer) {
-    // Add to running stroke total
+    // Add to running totals
     receivedStrokesTotal += convertedStrokes.length;
-    
-    // Update progress store
+    receivedStrokesForCurrentTransfer += convertedStrokes.length;
+
+    // The pen sends one OFFLINE_DATA_SEND_SUCCESS per page, so we must keep
+    // waiting until the cumulative received count reaches the expected total.
+    //
+    // OFFLINE_DATA_RESPONSE (type 49) is consumed internally by the SDK and never
+    // reaches our callback, so we derive the expected total from the STATUS
+    // percentage that fires just before each SUCCESS:
+    //   STATUS fires with cumulative% = strokes_so_far / total_strokes * 100
+    //   Therefore: total_strokes = strokes_so_far / (cumulative% / 100)
+    if (expectedStrokesForCurrentTransfer === 0 && lastStatusPercentage > 0) {
+      const estimated = Math.round(receivedStrokesForCurrentTransfer / (lastStatusPercentage / 100));
+      if (estimated > 0) {
+        expectedStrokesForCurrentTransfer = estimated;
+        console.log(`📊 Estimated total from STATUS ${lastStatusPercentage.toFixed(2)}%: ${estimated} strokes`);
+      }
+    }
+
+    // Push current per-book counts to the UI store
     updateTransferProgress({
       receivedStrokes: receivedStrokesTotal,
+      currentBookStrokes: receivedStrokesForCurrentTransfer,
+      expectedStrokes: expectedStrokesForCurrentTransfer,
       status: 'receiving'
     });
-    
-    console.log(`📊 Progress: ${receivedStrokesTotal} strokes total`);
+
+    if (expectedStrokesForCurrentTransfer > 0 &&
+        receivedStrokesForCurrentTransfer < expectedStrokesForCurrentTransfer) {
+      console.log(`📊 Chunk received: ${receivedStrokesForCurrentTransfer}/${expectedStrokesForCurrentTransfer} strokes — waiting for more pages`);
+      return false; // more chunks expected
+    }
+
+    console.log(`📊 Transfer complete: ${receivedStrokesForCurrentTransfer} strokes` +
+      (expectedStrokesForCurrentTransfer > 0 ? `/${expectedStrokesForCurrentTransfer} expected` : ' (no count tracking)'));
+    return true; // all strokes received — safe to resolve
   } else if (detectedBook && pendingOfflineTransfer && detectedBook !== pendingOfflineTransfer) {
-    // This is a problem - data doesn't match what we're waiting for
-    console.warn('%c⚠️ BOOK ID MISMATCH!', 'background: #f44336; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold;');
+    // Data arrived for a different book than requested (e.g. BLE retransmission or
+    // pen firmware sends books out of order). Strokes were still added to the store,
+    // but we must NOT resolve the pending transfer — keep waiting for the correct
+    // book's data. The idle timeout acts as the ultimate fallback.
+    console.warn('%c⚠️ BOOK ID MISMATCH — not resolving transfer', 'background: #f44336; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold;');
     console.warn(`   Received data for book: ${detectedBook} (raw: ${detectedBookRaw}, type: ${typeof detectedBookRaw})`);
     console.warn(`   But waiting for book: ${pendingOfflineTransfer} (type: ${typeof pendingOfflineTransfer})`);
-    console.warn(`   Data was still added to store - but transfer tracking may be broken`);
-    
-    // Even though there's a mismatch, data was received, so update the idle timer
-    // The idle detection will eventually complete the transfer
+    console.warn(`   Strokes added to store. Waiting for correct book data (idle timeout is fallback).`);
+    return false; // mismatch — do NOT resolve; keep the promise live
   }
+
+  // No book tracking active (e.g. no pendingOfflineTransfer), safe to resolve
+  return true;
 }

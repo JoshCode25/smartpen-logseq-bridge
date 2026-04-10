@@ -389,6 +389,19 @@ npm run preview
 - All three detectors (underlines, boxes, circles) now operate on individual strokes only
 - See: `docs/QUICK-ARCHITECTURE-REFERENCE.md` → Decorative Stroke Filter
 
+**Offline Import — Multi-book Reliability & Progress UI (2026-04-10):**
+- Fixed critical bug where earlier books in a multi-book import were skipped after their first data chunk; only the last book was fully imported
+- **Three root causes fixed in `src/lib/pen-sdk.js`:**
+  1. `offlineTransferResolver` not cleared after use — stale BLE retransmissions resolved the next book's promise immediately; fix: null the global before calling resolver
+  2. Book ID mismatch — pen sends data for old book during new book request; `handleOfflineDataReceived()` now returns `false` on mismatch, gating the resolver call on return value
+  3. Multiple chunks per book — SDK fires `OFFLINE_DATA_SEND_SUCCESS` once per page, not once per book; code was resolving after first chunk; fix: hold promise open until received ≥ expected
+- **Expected stroke count:** `OFFLINE_DATA_RESPONSE` (type 49) is consumed internally by the SDK and never forwarded to the app's `messageCallback`; count estimated from `OFFLINE_DATA_SEND_STATUS` percentage: `total = received / (percent / 100)`
+- **Transfer progress UI:** real-time per-book stroke count and percentage in both builds:
+  - Web build: `src/components/pen/TransferProgress.svelte`
+  - Desktop/Electron build: `src/components/header/ActionBar.svelte` inline popup (class `transfer-popup`) — this is the component the Electron app actually renders
+  - Format: `Book X/Y · N/M strokes (P%)` with determinate bar when expected count is known
+- See: `docs/QUICK-ARCHITECTURE-REFERENCE.md` → Offline Import — Multi-book Reliability & Progress UI
+
 **Offline Import Performance (2026-03-19):**
 - Resolved per-book transfer promise immediately on `OFFLINE_DATA_SEND_SUCCESS` instead of waiting 10s idle timeout — the SDK's own "success" signal is reliable; idle timeout kept as fallback only
 - Reduced `INTER_BOOK_DELAY_MS` from 1000ms → 500ms (BLE stabilisation delay between books)

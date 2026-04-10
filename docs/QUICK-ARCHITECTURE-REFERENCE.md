@@ -1,7 +1,7 @@
 # Quick Architecture Reference
 
 **Current Version:** 3.1 (Append-Only with Explicit Deletions)
-**Last Updated:** 2026-03-24
+**Last Updated:** 2026-04-10
 
 This document provides a quick reference for AI assistants working on the smartpen-logseq-bridge project.
 
@@ -221,16 +221,43 @@ Detection types remain: underlines (long, straight, horizontal), single-stroke b
 
 ---
 
-#### ✅ Offline Import Performance (2026-03-19)
-Two changes to `src/lib/pen-sdk.js` to reduce import time for multi-book syncs:
+#### ✅ Offline Import — Multi-book Reliability & Progress UI (2026-04-10)
+Fixed critical bug where only the last selected book was fully imported; earlier books were skipped after the first data chunk. Multiple root causes addressed in `src/lib/pen-sdk.js`:
 
-1. **Resolve on `OFFLINE_DATA_SEND_SUCCESS`** — the SDK fires this event after delivering all stroke data for a book. The code now resolves the per-book transfer promise immediately after `handleOfflineDataReceived()` processes the strokes, rather than waiting for a 10-second idle timeout. The idle timeout is retained as a fallback for cases where `SEND_SUCCESS` never fires.
+**Root Cause 1 — Resolver not cleared after use**
+After book N's promise resolved, `offlineTransferResolver` still held the resolver. Any stale BLE retransmission of `OFFLINE_DATA_SEND_SUCCESS` would immediately resolve book N+1's promise.
+Fix: capture resolver in local variable, null the global, then call it.
 
-2. **`INTER_BOOK_DELAY_MS` reduced from 1000ms → 500ms** — the delay between requesting sequential books (BLE stabilisation).
+**Root Cause 2 — Book ID mismatch resolving wrong promise**
+The pen sometimes sends data for an old book while the new one is being requested. `OFFLINE_DATA_SEND_SUCCESS` was still resolving the active promise even when `handleOfflineDataReceived()` received wrong-book data.
+Fix: `handleOfflineDataReceived()` now returns `true`/`false`; resolver only called when it returns `true`.
 
-Result: a 5-book import that previously took ~55s now takes ~13s. No change to data safety — strokes are fully processed before the promise resolves.
+**Root Cause 3 — Multiple chunks per book (main skipping bug)**
+The SDK sends `OFFLINE_DATA_SEND_SUCCESS` **once per page**, not once per book. A book with 1081 strokes arrived in ~130 chunks of ~8 strokes each. The code was resolving after the first chunk (8 strokes received).
+Fix: track `receivedStrokesForCurrentTransfer` vs `expectedStrokesForCurrentTransfer`; hold promise open until all chunks arrive.
+
+**Estimating expected stroke count**
+`OFFLINE_DATA_RESPONSE` (type 49) carries the expected count, but the SDK consumes it internally and **never forwards it** to the app's `messageCallback`. Dead code path.
+Fix: derive count from `OFFLINE_DATA_SEND_STATUS` percentage: `total = receivedSoFar / (percent / 100)`. Updated on first chunk, refined as more chunks arrive.
+
+**Transfer progress UI**
+Real-time stroke/percentage display now shown in both builds:
+- **Web build**: `src/components/pen/TransferProgress.svelte` — determinate bar when expected count is known; indeterminate animation otherwise; stats show `Book X/Y · N/M strokes (P%)`
+- **Desktop (Electron) build**: inline popup in `src/components/header/ActionBar.svelte` (class names `transfer-popup`, `transfer-bar`, `transfer-fill`) — same display format applied here; this is the component actually rendered in the desktop app
+- Store: `src/stores/pen.js` — `transferProgress` has `currentBookStrokes` and `expectedStrokes` fields; `transferPercent` derived store computes per-book percentage
 
 Key config: `TRANSFER_CONFIG` object at `src/lib/pen-sdk.js:511`
+
+---
+
+#### ✅ Offline Import Performance (2026-03-19)
+Two earlier changes to `src/lib/pen-sdk.js` to reduce base import time:
+
+1. **Resolve on `OFFLINE_DATA_SEND_SUCCESS`** — resolves per-book promise immediately after strokes are processed, rather than waiting for a 10-second idle timeout. Idle timeout retained as fallback.
+
+2. **`INTER_BOOK_DELAY_MS` reduced from 1000ms → 500ms** — BLE stabilisation delay between books.
+
+Result: a 5-book import that previously took ~55s now takes ~13s.
 
 ---
 

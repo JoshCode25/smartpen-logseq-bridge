@@ -1,12 +1,11 @@
 <script>
-  import { transferProgress } from '$stores';
+  import { transferProgress, transferPercent } from '$stores';
   import { cancelOfflineTransfer } from '$lib/pen-sdk.js';
-  
+
   function handleCancel() {
     cancelOfflineTransfer();
   }
-  
-  // Format status for display
+
   function getStatusText(status) {
     switch (status) {
       case 'requesting': return 'Requesting...';
@@ -33,15 +32,24 @@
         </button>
       {/if}
     </div>
-    
+
     <div class="progress-bar-container">
-      <div class="progress-bar indeterminate"></div>
+      {#if $transferProgress.expectedStrokes > 0}
+        <div class="progress-bar" style="width: {$transferPercent}%"></div>
+      {:else}
+        <div class="progress-bar indeterminate"></div>
+      {/if}
     </div>
-    
+
     <div class="progress-stats">
       <span class="info">
         {#if $transferProgress.currentBook > 0}
-          Book {$transferProgress.currentBook}/{$transferProgress.totalBooks}, {$transferProgress.receivedStrokes} strokes
+          Book {$transferProgress.currentBook}/{$transferProgress.totalBooks}
+          {#if $transferProgress.expectedStrokes > 0}
+            · {$transferProgress.currentBookStrokes}/{$transferProgress.expectedStrokes} strokes ({$transferPercent}%)
+          {:else}
+            · {$transferProgress.currentBookStrokes} strokes
+          {/if}
         {:else}
           {getStatusText($transferProgress.status)}
         {/if}

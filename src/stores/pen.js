@@ -18,7 +18,9 @@ export const transferProgress = writable({
   active: false,
   currentBook: 0,           // Current book number (1-indexed for display)
   totalBooks: 0,            // Total books to import
-  receivedStrokes: 0,       // Running total of strokes
+  receivedStrokes: 0,       // Running total of strokes across all books
+  currentBookStrokes: 0,    // Strokes received for the current book only
+  expectedStrokes: 0,       // Expected total for current book (estimated from STATUS %)
   elapsedSeconds: 0,
   status: '', // 'requesting', 'receiving', 'processing', 'complete', 'error'
   canCancel: false
@@ -43,9 +45,13 @@ export const penMemory = derived(penInfo, $info => {
   return `${$info.UsedMem || 0}%`;
 });
 
-// Derived: Transfer percentage - no longer used since we don't have expected counts
-// Keeping for backwards compatibility but always returns 0
-export const transferPercent = derived(transferProgress, $progress => 0);
+// Derived: Per-book transfer percentage (0 until expected count is known)
+export const transferPercent = derived(transferProgress, $progress => {
+  if ($progress.expectedStrokes > 0) {
+    return Math.min(100, Math.round($progress.currentBookStrokes / $progress.expectedStrokes * 100));
+  }
+  return 0;
+});
 
 /**
  * Set pen connected state
@@ -101,6 +107,8 @@ export function resetTransferProgress() {
     currentBook: 0,
     totalBooks: 0,
     receivedStrokes: 0,
+    currentBookStrokes: 0,
+    expectedStrokes: 0,
     elapsedSeconds: 0,
     status: '',
     canCancel: false

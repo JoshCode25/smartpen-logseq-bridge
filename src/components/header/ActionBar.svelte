@@ -31,6 +31,7 @@
     lastTranscription,
     pageTranscriptions,
     transferProgress,
+    transferPercent,
     hasPendingDeletions,
     canUndo,
     markStrokesDeleted,
@@ -600,12 +601,21 @@
         {/if}
       </div>
       <div class="transfer-bar">
-        <div class="transfer-fill indeterminate"></div>
+        {#if $transferProgress.expectedStrokes > 0}
+          <div class="transfer-fill" style="width: {$transferPercent}%"></div>
+        {:else}
+          <div class="transfer-fill indeterminate"></div>
+        {/if}
       </div>
       <div class="transfer-stats">
         <span>
           {#if $transferProgress.currentBook > 0}
-            Book {$transferProgress.currentBook}/{$transferProgress.totalBooks}, {$transferProgress.receivedStrokes} strokes
+            Book {$transferProgress.currentBook}/{$transferProgress.totalBooks}
+            {#if $transferProgress.expectedStrokes > 0}
+              · {$transferProgress.currentBookStrokes}/{$transferProgress.expectedStrokes} strokes ({$transferPercent}%)
+            {:else}
+              · {$transferProgress.currentBookStrokes} strokes
+            {/if}
           {:else}
             {$transferProgress.status === 'requesting' ? 'Requesting...' : 'Waiting...'}
           {/if}
