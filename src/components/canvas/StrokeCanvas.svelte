@@ -21,7 +21,7 @@
   import { hasSelection, getSelectedBounds } from '$stores/selection.js';
   import { logseqConnected } from '$stores';
   import { copyStrokesAsExcalidraw, generateSketchMacro } from '$lib/excalidraw-export.js';
-  import { buildJsonExportData } from '$lib/stroke-storage.js';
+  import { buildJsonExportData, buildMdExportData } from '$lib/stroke-storage.js';
   import CanvasControls from './CanvasControls.svelte';
   import PageSelector from './PageSelector.svelte';
   import FilteredStrokesPanel from '../strokes/FilteredStrokesPanel.svelte';
@@ -1077,6 +1077,11 @@
     downloadFile(JSON.stringify(exportData), filename, 'application/json');
   }
 
+  function exportMd() {
+    const pages = buildMdExportData(visibleStrokes);
+    pages.forEach(({ content, filename }) => downloadFile(content, filename, 'text/markdown'));
+  }
+
   async function copySketchMacro() {
     if (!$hasSelection) return;
     const bounds = getSelectedBounds();
@@ -1539,6 +1544,7 @@
         SVG{#if $hasSelection} ({$selectionCount}){/if}
       </button>
       <button class="btn btn-secondary small" on:click={exportJson}>JSON</button>
+      <button class="btn btn-secondary small" on:click={exportMd}>MD</button>
     </div>
   </div>
 

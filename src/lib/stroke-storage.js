@@ -190,12 +190,11 @@ export function buildPageStorageObject(pageInfo, strokes) {
 }
 
 /**
- * Build the JSON export payload from raw pen strokes.
+ * Build the JSON export payload (editor Format 1: { slug, strokes }).
  *
- * Groups strokes by book/page and produces a top-level object with a
- * `pages` array so the result is always a valid JSON object (never a bare
- * array). Per-dot timestamps are omitted — the stroke-level startTime /
- * endTime carry all necessary timing information.
+ * Produces a flat strokes array sorted by startTime. Points are [x, y] pairs.
+ * Multi-page exports add a `pageGroup` field to each stroke so the editor can
+ * separate them. Single-page exports omit pageGroup.
  *
  * @param {Array} rawStrokes - Raw pen strokes (pageInfo + dotArray)
  * @returns {{ exportData: Object, filename: string }}
@@ -209,34 +208,80 @@ export function buildJsonExportData(rawStrokes) {
     pageMap.get(key).strokes.push(stroke);
   });
 
-  const pages = Array.from(pageMap.values()).map(({ pageInfo, strokes }) => {
-    // Strip per-dot timestamps; store only [x, y] pairs
-    const stored = convertToStorageFormat(strokes).map(s => ({
-      ...s,
-      points: s.points.map(([x, y]) => [x, y])
-    }));
-    const bounds = calculateBounds(stored);
-    return {
-      pageInfo: {
-        section: pageInfo.section,
-        owner: pageInfo.owner,
-        book: pageInfo.book,
-        page: pageInfo.page
-      },
-      strokes: stored,
-      metadata: {
-        strokeCount: stored.length,
-        bounds
-      }
-    };
+  const pages = Array.from(pageMap.values());
+  const isMultiPage = pages.length > 1;
+
+  const allStrokes = [];
+  pages.forEach(({ pageInfo, strokes }) => {
+    const pi = pageInfo || {};
+    const pageGroup = `B${pi.book || 0}-P${pi.page || 0}`;
+    convertToStorageFormat(strokes).forEach(s => {
+      const stroke = { id: s.id, startTime: s.startTime, points: s.points.map(([x, y]) => [x, y]) };
+      if (isMultiPage) stroke.pageGroup = pageGroup;
+      allStrokes.push(stroke);
+    });
   });
 
-  const exportData = { version: "1.0", exportedAt: Date.now(), pages };
+  allStrokes.sort((a, b) => a.startTime - b.startTime);
+
+  const slug = pages.length === 1
+    ? `B${pages[0].pageInfo?.book || 0}-P${pages[0].pageInfo?.page || 0}`
+    : 'strokes';
+
+  const exportData = { slug, strokes: allStrokes };
   const filename = pages.length === 1
-    ? `B${pages[0].pageInfo.book}_P${pages[0].pageInfo.page}_strokes.json`
+    ? `B${pages[0].pageInfo?.book || 0}_P${pages[0].pageInfo?.page || 0}_strokes.json`
     : 'strokes.json';
 
   return { exportData, filename };
+}
+
+/**
+ * Build Markdown export payloads (editor Format 4: front-matter + json blocks).
+ *
+ * Generates one file per page. Each file contains LogSeq-style front matter
+ * (book:: / page::), a metadata json block, and a single chunk block with all
+ * strokes for that page. Points are [x, y] pairs, strokes sorted by startTime.
+ *
+ * @param {Array} rawStrokes - Raw pen strokes (pageInfo + dotArray)
+ * @returns {Array<{ content: string, filename: string }>}
+ */
+export function buildMdExportData(rawStrokes) {
+  const pageMap = new Map();
+  rawStrokes.forEach(stroke => {
+    const pi = stroke.pageInfo || {};
+    const key = `B${pi.book || 0}/P${pi.page || 0}`;
+    if (!pageMap.has(key)) pageMap.set(key, { pageInfo: pi, strokes: [] });
+    pageMap.get(key).strokes.push(stroke);
+  });
+
+  return Array.from(pageMap.values()).map(({ pageInfo, strokes }) => {
+    const pi = pageInfo || {};
+    const book = pi.book || 0;
+    const page = pi.page || 0;
+
+    const exportStrokes = convertToStorageFormat(strokes)
+      .map(s => ({ id: s.id, startTime: s.startTime, points: s.points.map(([x, y]) => [x, y]) }))
+      .sort((a, b) => a.startTime - b.startTime);
+
+    const metadata = { version: "1.0", pageInfo: { section: pi.section, owner: pi.owner, book, page } };
+    const chunk = { chunkIndex: 0, strokes: exportStrokes };
+
+    const content = [
+      `book:: ${book}`,
+      `page:: ${page}`,
+      ``,
+      '```json',
+      JSON.stringify(metadata),
+      '```',
+      ``,
+      '```json',
+      JSON.stringify(chunk),
+      '```',
+    ].join('\n');
+
+    return { content, filename: `B${book}_P${page}_strokes.md` };
+  });
 }
 
 /**
