@@ -116,3 +116,60 @@ If the top-level object has `segments[]` where `segments[0].viewBox` exists, it 
 ## Recommendation
 
 Use **Format 1** (`{ slug, strokes }`) for any new exporter — it is the canonical output of `ingest-neo.js` and the most tested path. Include `id` and `startTime` on every stroke; omit `pageGroup` unless you need multi-page separation.
+
+---
+
+## SmartPen Logseq Bridge — Exporter output
+
+The **JSON** and **MD** export buttons in the canvas toolbar produce files that satisfy the formats above.
+
+### JSON export → Format 1
+
+**Single page** (`B{book}_P{page}_strokes.json`):
+
+```json
+{
+  "slug": "B3017-P42",
+  "strokes": [
+    { "id": "s1000", "startTime": 1000, "points": [[x, y], ...] },
+    { "id": "s2000", "startTime": 2000, "points": [[x, y], ...] }
+  ]
+}
+```
+
+**Multi-page** (`strokes.json`) — strokes from all pages flattened, each tagged with `pageGroup`:
+
+```json
+{
+  "slug": "strokes",
+  "strokes": [
+    { "id": "s1000", "startTime": 1000, "pageGroup": "B3017-P42", "points": [[x, y], ...] },
+    { "id": "s2000", "startTime": 2000, "pageGroup": "B3017-P43", "points": [[x, y], ...] }
+  ]
+}
+```
+
+- Stroke ID format: `s{startTime}` (matches the bridge's internal `generateStrokeId`).
+- Strokes are pre-sorted ascending by `startTime`.
+- `endTime` and `blockUuid` are not included — the editor does not use them.
+
+### MD export → Format 4
+
+One file per page (`B{book}_P{page}_strokes.md`). All strokes for the page go into a single chunk (`chunkIndex: 0`):
+
+```markdown
+book:: 3017
+page:: 42
+
+` ``json
+{"version":"1.0","pageInfo":{"section":3,"owner":1012,"book":3017,"page":42}}
+` ``
+
+` ``json
+{"chunkIndex":0,"strokes":[{"id":"s1000","startTime":1000,"points":[[x,y],...]},...]}
+` ``
+```
+
+- The editor generates the slug `book3017-page42` from the front-matter properties.
+- Strokes are pre-sorted ascending by `startTime`.
+- `endTime` and `blockUuid` are not included.
