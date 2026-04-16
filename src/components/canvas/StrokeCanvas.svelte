@@ -21,6 +21,7 @@
   import { hasSelection, getSelectedBounds } from '$stores/selection.js';
   import { logseqConnected } from '$stores';
   import { copyStrokesAsExcalidraw, generateSketchMacro } from '$lib/excalidraw-export.js';
+  import { buildJsonExportData } from '$lib/stroke-storage.js';
   import CanvasControls from './CanvasControls.svelte';
   import PageSelector from './PageSelector.svelte';
   import FilteredStrokesPanel from '../strokes/FilteredStrokesPanel.svelte';
@@ -1072,8 +1073,8 @@
   }
 
   function exportJson() {
-    const json = JSON.stringify(visibleStrokes, null, 2);
-    downloadFile(json, 'strokes.json', 'application/json');
+    const { exportData, filename } = buildJsonExportData(visibleStrokes);
+    downloadFile(JSON.stringify(exportData, null, 2), filename, 'application/json');
   }
 
   async function copySketchMacro() {

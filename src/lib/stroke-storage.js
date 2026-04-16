@@ -190,6 +190,42 @@ export function buildPageStorageObject(pageInfo, strokes) {
 }
 
 /**
+ * Build the JSON export payload from raw pen strokes.
+ *
+ * Groups strokes by book/page, converts each group to the LogSeq storage
+ * format (simplified, no pressure), and wraps each group in a
+ * buildPageStorageObject envelope — identical to what LogSeq stores but
+ * without chunking.
+ *
+ * Returns a single object when only one page is present, or an array when
+ * multiple pages are present (mirrors the exportJson() behaviour in
+ * StrokeCanvas.svelte).
+ *
+ * @param {Array} rawStrokes - Raw pen strokes (pageInfo + dotArray)
+ * @returns {{ exportData: Object|Array, filename: string }}
+ */
+export function buildJsonExportData(rawStrokes) {
+  const pageMap = new Map();
+  rawStrokes.forEach(stroke => {
+    const pi = stroke.pageInfo || {};
+    const key = `B${pi.book || 0}/P${pi.page || 0}`;
+    if (!pageMap.has(key)) pageMap.set(key, { pageInfo: pi, strokes: [] });
+    pageMap.get(key).strokes.push(stroke);
+  });
+
+  const pages = Array.from(pageMap.values()).map(({ pageInfo, strokes }) =>
+    buildPageStorageObject(pageInfo, convertToStorageFormat(strokes))
+  );
+
+  const exportData = pages.length === 1 ? pages[0] : pages;
+  const filename = pages.length === 1
+    ? `B${pages[0].pageInfo.book}_P${pages[0].pageInfo.page}_strokes.json`
+    : 'strokes.json';
+
+  return { exportData, filename };
+}
+
+/**
  * Build transcription storage object
  * @param {Object} transcription - Transcription result from MyScript
  * @param {number} strokeCount - Number of strokes transcribed
