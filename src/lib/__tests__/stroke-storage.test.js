@@ -356,7 +356,7 @@ function makeStrokeOnPage(startTime, book, page, dots = [[10, 20], [15, 25]], bl
 }
 
 describe('buildJsonExportData', () => {
-  // --- format shape ---
+  // --- top-level shape ---
 
   it('returns exportData and filename properties', () => {
     const result = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
@@ -364,39 +364,51 @@ describe('buildJsonExportData', () => {
     expect(result).toHaveProperty('filename');
   });
 
-  // --- single-page export ---
+  it('exportData is always a plain object (never a bare array)', () => {
+    const single = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]).exportData;
+    expect(Array.isArray(single)).toBe(false);
+    expect(typeof single).toBe('object');
 
-  it('returns a single object (not an array) for one page', () => {
-    const { exportData } = buildJsonExportData([
+    const multi = buildJsonExportData([
       makeStrokeOnPage(1000, 3017, 42),
-      makeStrokeOnPage(2000, 3017, 42)
-    ]);
-    expect(Array.isArray(exportData)).toBe(false);
-    expect(typeof exportData).toBe('object');
+      makeStrokeOnPage(2000, 3017, 43)
+    ]).exportData;
+    expect(Array.isArray(multi)).toBe(false);
+    expect(typeof multi).toBe('object');
   });
+
+  it('top-level has version, exportedAt, and pages array', () => {
+    const { exportData } = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
+    expect(exportData.version).toBe('1.0');
+    expect(typeof exportData.exportedAt).toBe('number');
+    expect(Array.isArray(exportData.pages)).toBe(true);
+  });
+
+  // --- single-page export ---
 
   it('single-page filename is B{book}_P{page}_strokes.json', () => {
     const { filename } = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
     expect(filename).toBe('B3017_P42_strokes.json');
   });
 
-  it('single-page exportData has correct version, pageInfo, strokes, and metadata', () => {
+  it('single-page exportData has one page with correct pageInfo, strokes, and metadata', () => {
     const { exportData } = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
-    expect(exportData.version).toBe('1.0');
-    expect(exportData.pageInfo.book).toBe(3017);
-    expect(exportData.pageInfo.page).toBe(42);
-    expect(Array.isArray(exportData.strokes)).toBe(true);
-    expect(exportData.strokes).toHaveLength(1);
-    expect(exportData.metadata).toBeDefined();
-    expect(exportData.metadata.strokeCount).toBe(1);
-    expect(exportData.metadata.bounds).toBeDefined();
+    expect(exportData.pages).toHaveLength(1);
+    const page = exportData.pages[0];
+    expect(page.pageInfo.book).toBe(3017);
+    expect(page.pageInfo.page).toBe(42);
+    expect(Array.isArray(page.strokes)).toBe(true);
+    expect(page.strokes).toHaveLength(1);
+    expect(page.metadata).toBeDefined();
+    expect(page.metadata.strokeCount).toBe(1);
+    expect(page.metadata.bounds).toBeDefined();
   });
 
-  // --- format matches LogSeq (simplified, no pressure) ---
+  // --- stroke format ---
 
   it('strokes use simplified format: id, startTime, endTime, blockUuid, points', () => {
     const { exportData } = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
-    const stroke = exportData.strokes[0];
+    const stroke = exportData.pages[0].strokes[0];
     expect(stroke.id).toBe('s1000');
     expect(stroke.startTime).toBe(1000);
     expect(stroke.endTime).toBe(2000);
@@ -404,11 +416,11 @@ describe('buildJsonExportData', () => {
     expect(Array.isArray(stroke.points)).toBe(true);
   });
 
-  it('points are [x, y, timestamp] triples — pressure (f) is stripped', () => {
+  it('points are [x, y] pairs — no per-dot timestamp, no pressure', () => {
     const { exportData } = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
-    exportData.strokes.forEach(s =>
+    exportData.pages[0].strokes.forEach(s =>
       s.points.forEach(pt => {
-        expect(pt).toHaveLength(3); // x, y, timestamp only
+        expect(pt).toHaveLength(2); // x, y only
       })
     );
   });
@@ -416,7 +428,7 @@ describe('buildJsonExportData', () => {
   it('preserves blockUuid through the export pipeline', () => {
     const stroke = makeStrokeOnPage(1000, 3017, 42, [[10, 20]], 'uuid-abc');
     const { exportData } = buildJsonExportData([stroke]);
-    expect(exportData.strokes[0].blockUuid).toBe('uuid-abc');
+    expect(exportData.pages[0].strokes[0].blockUuid).toBe('uuid-abc');
   });
 
   it('all strokes are in a single flat array — no chunking', () => {
@@ -424,28 +436,26 @@ describe('buildJsonExportData', () => {
       makeStrokeOnPage(i * 10, 3017, 42)
     );
     const { exportData } = buildJsonExportData(rawStrokes);
-    // Should be a flat array of 250 strokes, not split into chunks
-    expect(exportData.strokes).toHaveLength(250);
-    expect(exportData.strokes[0]).not.toHaveProperty('chunkIndex');
+    expect(exportData.pages[0].strokes).toHaveLength(250);
+    expect(exportData.pages[0].strokes[0]).not.toHaveProperty('chunkIndex');
   });
 
   it('does not include raw dotArray on exported strokes', () => {
     const { exportData } = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
-    exportData.strokes.forEach(s => {
+    exportData.pages[0].strokes.forEach(s => {
       expect(s).not.toHaveProperty('dotArray');
     });
   });
 
   // --- multi-page export ---
 
-  it('returns an array for strokes spanning multiple pages', () => {
+  it('multi-page export has one entry per page in pages array', () => {
     const rawStrokes = [
       makeStrokeOnPage(1000, 3017, 42),
       makeStrokeOnPage(2000, 3017, 43)
     ];
     const { exportData } = buildJsonExportData(rawStrokes);
-    expect(Array.isArray(exportData)).toBe(true);
-    expect(exportData).toHaveLength(2);
+    expect(exportData.pages).toHaveLength(2);
   });
 
   it('multi-page filename is strokes.json', () => {
@@ -464,8 +474,8 @@ describe('buildJsonExportData', () => {
       makeStrokeOnPage(3000, 3017, 43)
     ];
     const { exportData } = buildJsonExportData(rawStrokes);
-    const page42 = exportData.find(p => p.pageInfo.page === 42);
-    const page43 = exportData.find(p => p.pageInfo.page === 43);
+    const page42 = exportData.pages.find(p => p.pageInfo.page === 42);
+    const page43 = exportData.pages.find(p => p.pageInfo.page === 43);
     expect(page42.strokes).toHaveLength(2);
     expect(page43.strokes).toHaveLength(1);
   });
@@ -476,19 +486,18 @@ describe('buildJsonExportData', () => {
       makeStrokeOnPage(2000, 9001, 7)
     ];
     const { exportData } = buildJsonExportData(rawStrokes);
-    const books = exportData.map(p => p.pageInfo.book);
+    const books = exportData.pages.map(p => p.pageInfo.book);
     expect(books).toContain(3017);
     expect(books).toContain(9001);
   });
 
-  it('each entry in multi-page export has version, pageInfo, strokes, and metadata', () => {
+  it('each page entry has pageInfo, strokes, and metadata', () => {
     const rawStrokes = [
       makeStrokeOnPage(1000, 3017, 42),
       makeStrokeOnPage(2000, 3017, 43)
     ];
     const { exportData } = buildJsonExportData(rawStrokes);
-    exportData.forEach(pageObj => {
-      expect(pageObj.version).toBe('1.0');
+    exportData.pages.forEach(pageObj => {
       expect(pageObj.pageInfo).toBeDefined();
       expect(Array.isArray(pageObj.strokes)).toBe(true);
       expect(pageObj.metadata).toBeDefined();
@@ -501,9 +510,7 @@ describe('buildJsonExportData', () => {
   it('handles empty stroke array without throwing', () => {
     expect(() => buildJsonExportData([])).not.toThrow();
     const { exportData } = buildJsonExportData([]);
-    // No pages → array of zero entries
-    expect(Array.isArray(exportData)).toBe(true);
-    expect(exportData).toHaveLength(0);
+    expect(exportData.pages).toHaveLength(0);
   });
 
   it('handles strokes with missing pageInfo gracefully', () => {

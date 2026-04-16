@@ -1074,7 +1074,7 @@
 
   function exportJson() {
     const { exportData, filename } = buildJsonExportData(visibleStrokes);
-    downloadFile(JSON.stringify(exportData, null, 2), filename, 'application/json');
+    downloadFile(JSON.stringify(exportData), filename, 'application/json');
   }
 
   async function copySketchMacro() {
