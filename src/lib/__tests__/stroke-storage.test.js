@@ -32,6 +32,7 @@ import {
   deduplicateStrokes,
   buildPageStorageObject,
   buildJsonExportData,
+  buildMdExportData,
   splitStrokesIntoChunks,
   buildChunkedStorageObjects,
   parseChunkedJsonBlocks,
@@ -356,7 +357,7 @@ function makeStrokeOnPage(startTime, book, page, dots = [[10, 20], [15, 25]], bl
 }
 
 describe('buildJsonExportData', () => {
-  // --- format shape ---
+  // --- top-level shape (Format 1: { slug, strokes }) ---
 
   it('returns exportData and filename properties', () => {
     const result = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
@@ -364,15 +365,18 @@ describe('buildJsonExportData', () => {
     expect(result).toHaveProperty('filename');
   });
 
+  it('exportData is always a plain object with slug and strokes', () => {
+    const { exportData } = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
+    expect(Array.isArray(exportData)).toBe(false);
+    expect(typeof exportData.slug).toBe('string');
+    expect(Array.isArray(exportData.strokes)).toBe(true);
+  });
+
   // --- single-page export ---
 
-  it('returns a single object (not an array) for one page', () => {
-    const { exportData } = buildJsonExportData([
-      makeStrokeOnPage(1000, 3017, 42),
-      makeStrokeOnPage(2000, 3017, 42)
-    ]);
-    expect(Array.isArray(exportData)).toBe(false);
-    expect(typeof exportData).toBe('object');
+  it('single-page slug is B{book}-P{page}', () => {
+    const { exportData } = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
+    expect(exportData.slug).toBe('B3017-P42');
   });
 
   it('single-page filename is B{book}_P{page}_strokes.json', () => {
@@ -380,43 +384,48 @@ describe('buildJsonExportData', () => {
     expect(filename).toBe('B3017_P42_strokes.json');
   });
 
-  it('single-page exportData has correct version, pageInfo, strokes, and metadata', () => {
-    const { exportData } = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
-    expect(exportData.version).toBe('1.0');
-    expect(exportData.pageInfo.book).toBe(3017);
-    expect(exportData.pageInfo.page).toBe(42);
-    expect(Array.isArray(exportData.strokes)).toBe(true);
-    expect(exportData.strokes).toHaveLength(1);
-    expect(exportData.metadata).toBeDefined();
-    expect(exportData.metadata.strokeCount).toBe(1);
-    expect(exportData.metadata.bounds).toBeDefined();
+  it('single-page strokes are a flat array with correct count', () => {
+    const { exportData } = buildJsonExportData([
+      makeStrokeOnPage(1000, 3017, 42),
+      makeStrokeOnPage(2000, 3017, 42)
+    ]);
+    expect(exportData.strokes).toHaveLength(2);
   });
 
-  // --- format matches LogSeq (simplified, no pressure) ---
+  it('single-page strokes have no pageGroup field', () => {
+    const { exportData } = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
+    exportData.strokes.forEach(s => expect(s).not.toHaveProperty('pageGroup'));
+  });
 
-  it('strokes use simplified format: id, startTime, endTime, blockUuid, points', () => {
+  // --- stroke format (ProcessedStroke: id, startTime, points) ---
+
+  it('strokes have id, startTime, and points — no endTime, blockUuid, or dotArray', () => {
     const { exportData } = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
     const stroke = exportData.strokes[0];
     expect(stroke.id).toBe('s1000');
     expect(stroke.startTime).toBe(1000);
-    expect(stroke.endTime).toBe(2000);
-    expect(stroke).toHaveProperty('blockUuid');
     expect(Array.isArray(stroke.points)).toBe(true);
+    expect(stroke).not.toHaveProperty('endTime');
+    expect(stroke).not.toHaveProperty('blockUuid');
+    expect(stroke).not.toHaveProperty('dotArray');
   });
 
-  it('points are [x, y, timestamp] triples — pressure (f) is stripped', () => {
+  it('points are [x, y] pairs — no per-dot timestamp, no pressure', () => {
     const { exportData } = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
     exportData.strokes.forEach(s =>
-      s.points.forEach(pt => {
-        expect(pt).toHaveLength(3); // x, y, timestamp only
-      })
+      s.points.forEach(pt => expect(pt).toHaveLength(2))
     );
   });
 
-  it('preserves blockUuid through the export pipeline', () => {
-    const stroke = makeStrokeOnPage(1000, 3017, 42, [[10, 20]], 'uuid-abc');
-    const { exportData } = buildJsonExportData([stroke]);
-    expect(exportData.strokes[0].blockUuid).toBe('uuid-abc');
+  it('strokes are sorted ascending by startTime', () => {
+    const rawStrokes = [
+      makeStrokeOnPage(3000, 3017, 42),
+      makeStrokeOnPage(1000, 3017, 42),
+      makeStrokeOnPage(2000, 3017, 42)
+    ];
+    const { exportData } = buildJsonExportData(rawStrokes);
+    const times = exportData.strokes.map(s => s.startTime);
+    expect(times).toEqual([1000, 2000, 3000]);
   });
 
   it('all strokes are in a single flat array — no chunking', () => {
@@ -424,76 +433,47 @@ describe('buildJsonExportData', () => {
       makeStrokeOnPage(i * 10, 3017, 42)
     );
     const { exportData } = buildJsonExportData(rawStrokes);
-    // Should be a flat array of 250 strokes, not split into chunks
     expect(exportData.strokes).toHaveLength(250);
     expect(exportData.strokes[0]).not.toHaveProperty('chunkIndex');
   });
 
-  it('does not include raw dotArray on exported strokes', () => {
-    const { exportData } = buildJsonExportData([makeStrokeOnPage(1000, 3017, 42)]);
-    exportData.strokes.forEach(s => {
-      expect(s).not.toHaveProperty('dotArray');
-    });
-  });
-
   // --- multi-page export ---
 
-  it('returns an array for strokes spanning multiple pages', () => {
-    const rawStrokes = [
+  it('multi-page slug is "strokes"', () => {
+    const { exportData } = buildJsonExportData([
       makeStrokeOnPage(1000, 3017, 42),
       makeStrokeOnPage(2000, 3017, 43)
-    ];
-    const { exportData } = buildJsonExportData(rawStrokes);
-    expect(Array.isArray(exportData)).toBe(true);
-    expect(exportData).toHaveLength(2);
+    ]);
+    expect(exportData.slug).toBe('strokes');
   });
 
   it('multi-page filename is strokes.json', () => {
-    const rawStrokes = [
+    const { filename } = buildJsonExportData([
       makeStrokeOnPage(1000, 3017, 42),
       makeStrokeOnPage(2000, 3017, 43)
-    ];
-    const { filename } = buildJsonExportData(rawStrokes);
+    ]);
     expect(filename).toBe('strokes.json');
   });
 
-  it('groups strokes correctly across pages — each page object contains only its strokes', () => {
-    const rawStrokes = [
-      makeStrokeOnPage(1000, 3017, 42),
-      makeStrokeOnPage(2000, 3017, 42),
-      makeStrokeOnPage(3000, 3017, 43)
-    ];
-    const { exportData } = buildJsonExportData(rawStrokes);
-    const page42 = exportData.find(p => p.pageInfo.page === 42);
-    const page43 = exportData.find(p => p.pageInfo.page === 43);
-    expect(page42.strokes).toHaveLength(2);
-    expect(page43.strokes).toHaveLength(1);
-  });
-
-  it('each page object in multi-page export has the correct pageInfo', () => {
-    const rawStrokes = [
-      makeStrokeOnPage(1000, 3017, 42),
-      makeStrokeOnPage(2000, 9001, 7)
-    ];
-    const { exportData } = buildJsonExportData(rawStrokes);
-    const books = exportData.map(p => p.pageInfo.book);
-    expect(books).toContain(3017);
-    expect(books).toContain(9001);
-  });
-
-  it('each entry in multi-page export has version, pageInfo, strokes, and metadata', () => {
+  it('multi-page strokes are flattened and each has a pageGroup', () => {
     const rawStrokes = [
       makeStrokeOnPage(1000, 3017, 42),
       makeStrokeOnPage(2000, 3017, 43)
     ];
     const { exportData } = buildJsonExportData(rawStrokes);
-    exportData.forEach(pageObj => {
-      expect(pageObj.version).toBe('1.0');
-      expect(pageObj.pageInfo).toBeDefined();
-      expect(Array.isArray(pageObj.strokes)).toBe(true);
-      expect(pageObj.metadata).toBeDefined();
-      expect(pageObj.metadata.strokeCount).toBeGreaterThan(0);
-    });
+    expect(exportData.strokes).toHaveLength(2);
+    exportData.strokes.forEach(s => expect(typeof s.pageGroup).toBe('string'));
+  });
+
+  it('multi-page pageGroup values are B{book}-P{page}', () => {
+    const rawStrokes = [
+      makeStrokeOnPage(1000, 3017, 42),
+      makeStrokeOnPage(2000, 3017, 43)
+    ];
+    const { exportData } = buildJsonExportData(rawStrokes);
+    const groups = exportData.strokes.map(s => s.pageGroup);
+    expect(groups).toContain('B3017-P42');
+    expect(groups).toContain('B3017-P43');
   });
 
   // --- edge cases ---
@@ -501,9 +481,7 @@ describe('buildJsonExportData', () => {
   it('handles empty stroke array without throwing', () => {
     expect(() => buildJsonExportData([])).not.toThrow();
     const { exportData } = buildJsonExportData([]);
-    // No pages → array of zero entries
-    expect(Array.isArray(exportData)).toBe(true);
-    expect(exportData).toHaveLength(0);
+    expect(exportData.strokes).toHaveLength(0);
   });
 
   it('handles strokes with missing pageInfo gracefully', () => {
@@ -518,6 +496,91 @@ describe('buildJsonExportData', () => {
     ];
     const { exportData } = buildJsonExportData(rawStrokes);
     expect(() => JSON.stringify(exportData)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildMdExportData
+// ---------------------------------------------------------------------------
+
+describe('buildMdExportData', () => {
+  it('returns one object per page with content and filename', () => {
+    const result = buildMdExportData([makeStrokeOnPage(1000, 3017, 42)]);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toHaveProperty('content');
+    expect(result[0]).toHaveProperty('filename');
+  });
+
+  it('filename is B{book}_P{page}_strokes.md', () => {
+    const [{ filename }] = buildMdExportData([makeStrokeOnPage(1000, 3017, 42)]);
+    expect(filename).toBe('B3017_P42_strokes.md');
+  });
+
+  it('content contains book:: and page:: front matter', () => {
+    const [{ content }] = buildMdExportData([makeStrokeOnPage(1000, 3017, 42)]);
+    expect(content).toContain('book:: 3017');
+    expect(content).toContain('page:: 42');
+  });
+
+  it('content contains a metadata json block with version and pageInfo', () => {
+    const [{ content }] = buildMdExportData([makeStrokeOnPage(1000, 3017, 42)]);
+    const blocks = [...content.matchAll(/```json\n([\s\S]*?)\n```/g)].map(m => JSON.parse(m[1]));
+    const meta = blocks.find(b => b.version && b.pageInfo);
+    expect(meta).toBeDefined();
+    expect(meta.version).toBe('1.0');
+    expect(meta.pageInfo.book).toBe(3017);
+    expect(meta.pageInfo.page).toBe(42);
+  });
+
+  it('content contains a chunk json block with chunkIndex and strokes', () => {
+    const [{ content }] = buildMdExportData([makeStrokeOnPage(1000, 3017, 42)]);
+    const blocks = [...content.matchAll(/```json\n([\s\S]*?)\n```/g)].map(m => JSON.parse(m[1]));
+    const chunk = blocks.find(b => b.chunkIndex === 0);
+    expect(chunk).toBeDefined();
+    expect(Array.isArray(chunk.strokes)).toBe(true);
+    expect(chunk.strokes).toHaveLength(1);
+  });
+
+  it('strokes in chunk have id, startTime, and [x,y] points — no endTime or blockUuid', () => {
+    const [{ content }] = buildMdExportData([makeStrokeOnPage(1000, 3017, 42)]);
+    const blocks = [...content.matchAll(/```json\n([\s\S]*?)\n```/g)].map(m => JSON.parse(m[1]));
+    const chunk = blocks.find(b => b.chunkIndex === 0);
+    const stroke = chunk.strokes[0];
+    expect(stroke.id).toBe('s1000');
+    expect(stroke.startTime).toBe(1000);
+    expect(stroke).not.toHaveProperty('endTime');
+    expect(stroke).not.toHaveProperty('blockUuid');
+    stroke.points.forEach(pt => expect(pt).toHaveLength(2));
+  });
+
+  it('strokes are sorted by startTime within the chunk', () => {
+    const rawStrokes = [
+      makeStrokeOnPage(3000, 3017, 42),
+      makeStrokeOnPage(1000, 3017, 42),
+      makeStrokeOnPage(2000, 3017, 42)
+    ];
+    const [{ content }] = buildMdExportData(rawStrokes);
+    const blocks = [...content.matchAll(/```json\n([\s\S]*?)\n```/g)].map(m => JSON.parse(m[1]));
+    const chunk = blocks.find(b => b.chunkIndex === 0);
+    const times = chunk.strokes.map(s => s.startTime);
+    expect(times).toEqual([1000, 2000, 3000]);
+  });
+
+  it('multi-page export returns one file per page', () => {
+    const rawStrokes = [
+      makeStrokeOnPage(1000, 3017, 42),
+      makeStrokeOnPage(2000, 3017, 43)
+    ];
+    const result = buildMdExportData(rawStrokes);
+    expect(result).toHaveLength(2);
+    const filenames = result.map(r => r.filename);
+    expect(filenames).toContain('B3017_P42_strokes.md');
+    expect(filenames).toContain('B3017_P43_strokes.md');
+  });
+
+  it('handles empty stroke array without throwing', () => {
+    expect(() => buildMdExportData([])).not.toThrow();
+    expect(buildMdExportData([])).toHaveLength(0);
   });
 });
 
